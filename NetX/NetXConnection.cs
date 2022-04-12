@@ -36,6 +36,8 @@ namespace NetX
         private static readonly byte[] _emptyGuid = Guid.Empty.ToByteArray();
         private static readonly ArrayPool<byte> _bufferPool = ArrayPool<byte>.Shared;
 
+        public bool IsConnected => _socket?.Connected ?? false;
+
         public NetXConnection(Socket socket, NetXConnectionOptions options, string name, ILogger logger, bool reuseSocket = false)
         {
             _socket = socket;

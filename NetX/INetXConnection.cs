@@ -16,5 +16,6 @@ namespace NetX
         ValueTask ReplyAsync(Guid messageId, Stream stream);
 
         void Disconnect();
+        bool IsConnected { get; }
     }
 }
