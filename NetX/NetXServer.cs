@@ -119,7 +119,7 @@ namespace NetX
             {
                 if (_sessions.TryAdd(session.Id, session))
                 {
-                    await _options.Processor.OnSessionConnectAsync(session);
+                    _ = DispatchOnSessionConnect(session);
                     await session.ProcessConnection(cancellationToken);
                 }
                 else
@@ -150,6 +150,18 @@ namespace NetX
                     _logger?.LogCritical("{svrName}: Fail on remove Session {sessId} from sessions dictionary", _serverName, session.Id);
                 }
                 sessionSocket.Close(1);
+            }
+        }
+
+        private async Task DispatchOnSessionConnect(INetXSession session)
+        {
+            try
+            {
+                await _options.Processor.OnSessionConnectAsync(session);
+            }
+            catch (Exception e)
+            {
+                _logger?.LogError(e, "{svrName}: Fail on dispatch OnSessionConnectAsync to session {sessId}", _serverName, session.Id);
             }
         }
     }

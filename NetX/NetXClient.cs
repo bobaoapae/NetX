@@ -21,7 +21,7 @@ namespace NetX
         {
             await _socket.ConnectAsync(_options.EndPoint, cancellationToken);
 
-            await ((NetXClientOptions)_options).Processor.OnConnectedAsync(this);
+            _ = DispatchOnClientConnect();
 
             _logger?.LogInformation("{name}: Tcp client connected to {address}:{port}", _clientName, _options.EndPoint.Address, _options.EndPoint.Port);
 
@@ -40,20 +40,32 @@ namespace NetX
             }
             finally
             {
-                await ((NetXClientOptions)_options).Processor.OnDisconnectedAsync();
+                await ((NetXClientOptions) _options).Processor.OnDisconnectedAsync();
+            }
+        }
+
+        private async Task DispatchOnClientConnect()
+        {
+            try
+            {
+                await ((NetXClientOptions) _options).Processor.OnConnectedAsync(this);
+            }
+            catch (Exception e)
+            {
+                _logger?.LogError(e, "{svrName}: Fail on dispatch OnConnectedAsync to client session", _clientName);
             }
         }
 
         protected override Task OnReceivedMessageAsync(NetXMessage message)
-            => ((NetXClientOptions)_options).Processor.OnReceivedMessageAsync(this, message);
+            => ((NetXClientOptions) _options).Processor.OnReceivedMessageAsync(this, message);
 
         protected override int GetReceiveMessageSize(in ArraySegment<byte> buffer)
-            => ((NetXClientOptions)_options).Processor.GetReceiveMessageSize(this, in buffer);
+            => ((NetXClientOptions) _options).Processor.GetReceiveMessageSize(this, in buffer);
 
         protected override void ProcessReceivedBuffer(in ArraySegment<byte> buffer)
-            => ((NetXClientOptions)_options).Processor.ProcessReceivedBuffer(this, in buffer);
+            => ((NetXClientOptions) _options).Processor.ProcessReceivedBuffer(this, in buffer);
 
         protected override void ProcessSendBuffer(in ArraySegment<byte> buffer)
-            => ((NetXClientOptions)_options).Processor.ProcessSendBuffer(this, in buffer);
+            => ((NetXClientOptions) _options).Processor.ProcessSendBuffer(this, in buffer);
     }
 }
