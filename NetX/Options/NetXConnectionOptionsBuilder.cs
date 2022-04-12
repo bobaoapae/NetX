@@ -11,6 +11,7 @@ namespace NetX.Options
         protected bool _duplex = false;
         protected int _duplexTimeout = 5000;
         protected bool _copyBuffer = true;
+        protected int _socketTimeout = 0;
 
         public INetXConnectionOptionsBuilder<T> EndPoint(IPEndPoint endPoint)
         {
@@ -49,6 +50,12 @@ namespace NetX.Options
         public INetXConnectionOptionsBuilder<T> SendBufferSize(int size)
         {
             _sendBufferSize = size;
+            return this;
+        }
+
+        public INetXConnectionOptionsBuilder<T> SocketTimeout(int timeout)
+        {
+            _socketTimeout = timeout;
             return this;
         }
 

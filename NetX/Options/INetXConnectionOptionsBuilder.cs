@@ -11,6 +11,7 @@ namespace NetX.Options
         INetXConnectionOptionsBuilder<T> CopyBuffer(bool copyBuffer);
         INetXConnectionOptionsBuilder<T> ReceiveBufferSize(int size);
         INetXConnectionOptionsBuilder<T> SendBufferSize(int size);
+        INetXConnectionOptionsBuilder<T> SocketTimeout(int timeout);
         T Build();
     }
 }

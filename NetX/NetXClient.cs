@@ -15,8 +15,6 @@ namespace NetX
             : base(new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp), options, clientName, loggerFactory?.CreateLogger<NetXClient>(), true)
         {
             _clientName = clientName ?? nameof(NetXClient);
-            _socket.NoDelay = _options.NoDelay;
-            _socket.LingerState = new LingerOption(true, 5);
         }
 
         public async Task ConnectAsync(CancellationToken cancellationToken = default)

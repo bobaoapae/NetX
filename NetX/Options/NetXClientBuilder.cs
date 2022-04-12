@@ -43,7 +43,8 @@ namespace NetX.Options
                 _sendBufferSize,
                 _duplex,
                 _duplexTimeout,
-                _copyBuffer);
+                _copyBuffer,
+                _socketTimeout);
 
             return new NetXClient(options, _loggerFactory, _clientName);
         }

@@ -51,9 +51,18 @@ namespace NetX
             _completions = new ConcurrentDictionary<Guid, TaskCompletionSource<ArraySegment<byte>>>();
 
             _reuseSocket = reuseSocket;
+            
+            socket.NoDelay = _options.NoDelay;
+            socket.LingerState = new LingerOption(true, 5);
+            socket.ReceiveTimeout = _options.SocketTimeout;
+            socket.SendTimeout = _options.SocketTimeout;
+            socket.ReceiveBufferSize = _options.RecvBufferSize;
+            socket.SendBufferSize = _options.SendBufferSize;
 
             socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, _options.RecvBufferSize);
             socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, _options.SendBufferSize);
+            socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveTimeout, _options.SocketTimeout);
+            socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendTimeout, _options.SocketTimeout);
         }
 
         #region Send Methods

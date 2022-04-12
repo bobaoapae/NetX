@@ -32,7 +32,16 @@ namespace NetX
             };
 
             _socket.Bind(options.EndPoint);
+            _socket.ReceiveTimeout = options.SocketTimeout;
+            _socket.SendTimeout = options.SocketTimeout;
+            _socket.ReceiveBufferSize = options.RecvBufferSize;
+            _socket.SendBufferSize = options.SendBufferSize;
 
+            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, options.RecvBufferSize);
+            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, options.SendBufferSize);
+            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveTimeout, options.SocketTimeout);
+            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendTimeout, options.SocketTimeout);
+            
             _options = options;
             _sessions = new ConcurrentDictionary<Guid, INetXSession>();
         }
