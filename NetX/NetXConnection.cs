@@ -29,6 +29,7 @@ namespace NetX
         private CancellationTokenSource _cancellationTokenSource;
 
         private readonly bool _reuseSocket;
+        private bool _isSocketDisconnectCalled;
 
         private readonly object _sync = new();
 
@@ -250,6 +251,10 @@ namespace NetX
 
         internal async Task ProcessConnection(CancellationToken cancellationToken = default)
         {
+            lock (_socket)
+            {
+                _isSocketDisconnectCalled = false;
+            }
             _cancellationTokenSource = new CancellationTokenSource();
             cancellationToken.Register(() => _cancellationTokenSource.Cancel());
 
@@ -280,8 +285,13 @@ namespace NetX
         {
             if(!_cancellationTokenSource.IsCancellationRequested)
                 _cancellationTokenSource.Cancel();
-            if (_socket.Connected)
+
+            lock (_socket)
             {
+                if(_isSocketDisconnectCalled)
+                    return;
+                
+                _isSocketDisconnectCalled = true;
                 _socket.Shutdown(SocketShutdown.Both);
                 _socket.Disconnect(_reuseSocket);
             }
@@ -301,11 +311,6 @@ namespace NetX
                     int bytesRead = await _socket.ReceiveAsync(memory, SocketFlags.None, cancellationToken);
                     if (bytesRead == 0)
                     {
-                        if (!_reuseSocket)
-                        {
-                            _socket.Close();
-                        }
-
                         break;
                     }
 

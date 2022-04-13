@@ -143,7 +143,15 @@ namespace NetX
                     {
                         //ignore
                     }
-                    await _options.Processor.OnSessionDisconnectAsync(session.Id);
+
+                    try
+                    {
+                        await _options.Processor.OnSessionDisconnectAsync(session.Id);
+                    }
+                    catch (Exception e)
+                    {
+                        _logger?.LogError(e, "{svrName}: An exception was throw on disconnect of Session {sessId}", _serverName, session.Id);
+                    }
                 }
                 else
                 {
