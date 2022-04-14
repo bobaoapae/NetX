@@ -32,7 +32,16 @@ namespace NetX
             };
 
             _socket.Bind(options.EndPoint);
+            _socket.ReceiveTimeout = options.SocketTimeout;
+            _socket.SendTimeout = options.SocketTimeout;
+            _socket.ReceiveBufferSize = options.RecvBufferSize;
+            _socket.SendBufferSize = options.SendBufferSize;
 
+            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, options.RecvBufferSize);
+            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, options.SendBufferSize);
+            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveTimeout, options.SocketTimeout);
+            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendTimeout, options.SocketTimeout);
+            
             _options = options;
             _sessions = new ConcurrentDictionary<Guid, INetXSession>();
         }
@@ -110,7 +119,7 @@ namespace NetX
             {
                 if (_sessions.TryAdd(session.Id, session))
                 {
-                    await _options.Processor.OnSessionConnectAsync(session);
+                    _ = DispatchOnSessionConnect(session);
                     await session.ProcessConnection(cancellationToken);
                 }
                 else
@@ -134,12 +143,33 @@ namespace NetX
                     {
                         //ignore
                     }
-                    await _options.Processor.OnSessionDisconnectAsync(session.Id);
+
+                    try
+                    {
+                        await _options.Processor.OnSessionDisconnectAsync(session.Id);
+                    }
+                    catch (Exception e)
+                    {
+                        _logger?.LogError(e, "{svrName}: An exception was throw on disconnect of Session {sessId}", _serverName, session.Id);
+                    }
                 }
                 else
                 {
                     _logger?.LogCritical("{svrName}: Fail on remove Session {sessId} from sessions dictionary", _serverName, session.Id);
                 }
+                sessionSocket.Close(1);
+            }
+        }
+
+        private async Task DispatchOnSessionConnect(INetXSession session)
+        {
+            try
+            {
+                await _options.Processor.OnSessionConnectAsync(session);
+            }
+            catch (Exception e)
+            {
+                _logger?.LogError(e, "{svrName}: Fail on dispatch OnSessionConnectAsync to session {sessId}", _serverName, session.Id);
             }
         }
     }

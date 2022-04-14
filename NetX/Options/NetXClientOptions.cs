@@ -14,14 +14,16 @@ namespace NetX.Options
             int sendBufferSize, 
             bool duplex,
             int duplexTimeout,
-            bool copyBuffer) : base(
+            bool copyBuffer,
+            int socketTimeout) : base(
                 endPoint, 
                 noDelay, 
                 recvBufferSize, 
                 sendBufferSize, 
                 duplex,
                 duplexTimeout,
-                copyBuffer)
+                copyBuffer,
+                socketTimeout)
         {
             Processor = processor;
         }

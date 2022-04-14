@@ -18,14 +18,16 @@ namespace NetX.Options
             int duplexTimeout,
             bool copyBuffer,
             bool useProxy,
-            int backLog) : base(
+            int backLog,
+            int socketTimeout) : base(
                 endPoint, 
                 noDelay, 
                 recvBufferSize, 
                 sendBufferSize, 
                 duplex,
                 duplexTimeout,
-                copyBuffer)
+                copyBuffer,
+                socketTimeout)
         {
             Processor = processor;
             UseProxy = useProxy;

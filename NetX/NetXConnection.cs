@@ -29,12 +29,15 @@ namespace NetX
         private CancellationTokenSource _cancellationTokenSource;
 
         private readonly bool _reuseSocket;
+        private bool _isSocketDisconnectCalled;
 
         private readonly object _sync = new();
 
         const int GUID_LEN = 16;
         private static readonly byte[] _emptyGuid = Guid.Empty.ToByteArray();
         private static readonly ArrayPool<byte> _bufferPool = ArrayPool<byte>.Shared;
+
+        public bool IsConnected => _socket?.Connected ?? false;
 
         public NetXConnection(Socket socket, NetXConnectionOptions options, string name, ILogger logger, bool reuseSocket = false)
         {
@@ -49,9 +52,18 @@ namespace NetX
             _completions = new ConcurrentDictionary<Guid, (TaskCompletionSource<ArraySegment<byte>>, CancellationTokenSource)>();
 
             _reuseSocket = reuseSocket;
+            
+            socket.NoDelay = _options.NoDelay;
+            socket.LingerState = new LingerOption(true, 5);
+            socket.ReceiveTimeout = _options.SocketTimeout;
+            socket.SendTimeout = _options.SocketTimeout;
+            socket.ReceiveBufferSize = _options.RecvBufferSize;
+            socket.SendBufferSize = _options.SendBufferSize;
 
             socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, _options.RecvBufferSize);
             socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, _options.SendBufferSize);
+            socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveTimeout, _options.SocketTimeout);
+            socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendTimeout, _options.SocketTimeout);
         }
 
         #region Send Methods
@@ -240,6 +252,10 @@ namespace NetX
 
         internal async Task ProcessConnection(CancellationToken cancellationToken = default)
         {
+            lock (_socket)
+            {
+                _isSocketDisconnectCalled = false;
+            }
             _cancellationTokenSource = new CancellationTokenSource();
             cancellationToken.Register(() => _cancellationTokenSource.Cancel());
 
@@ -270,8 +286,13 @@ namespace NetX
         {
             if(!_cancellationTokenSource.IsCancellationRequested)
                 _cancellationTokenSource.Cancel();
-            if (_socket.Connected)
+
+            lock (_socket)
             {
+                if(_isSocketDisconnectCalled)
+                    return;
+                
+                _isSocketDisconnectCalled = true;
                 _socket.Shutdown(SocketShutdown.Both);
                 _socket.Disconnect(_reuseSocket);
             }
@@ -291,11 +312,6 @@ namespace NetX
                     int bytesRead = await _socket.ReceiveAsync(memory, SocketFlags.None, cancellationToken);
                     if (bytesRead == 0)
                     {
-                        if (!_reuseSocket)
-                        {
-                            _socket.Close();
-                        }
-
                         break;
                     }
 
