@@ -22,7 +22,7 @@ namespace NetX
 
         private readonly Pipe _sendPipe;
         private readonly Pipe _receivePipe;
-        private readonly ConcurrentDictionary<Guid, TaskCompletionSource<ArraySegment<byte>>> _completions;
+        private readonly ConcurrentDictionary<Guid, (TaskCompletionSource<ArraySegment<byte>>, CancellationTokenSource)> _completions;
 
         private byte[] _recvBuffer;
         private byte[] _sendBuffer;
@@ -46,7 +46,7 @@ namespace NetX
 
             _sendPipe = new Pipe();
             _receivePipe = new Pipe();
-            _completions = new ConcurrentDictionary<Guid, TaskCompletionSource<ArraySegment<byte>>>();
+            _completions = new ConcurrentDictionary<Guid, (TaskCompletionSource<ArraySegment<byte>>, CancellationTokenSource)>();
 
             _reuseSocket = reuseSocket;
 
@@ -114,7 +114,7 @@ namespace NetX
                 throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
 
             var messageId = Guid.NewGuid();
-            if (!_completions.TryAdd(messageId, new TaskCompletionSource<ArraySegment<byte>>()))
+            if (!_completions.TryAdd(messageId, new(new TaskCompletionSource<ArraySegment<byte>>(), new CancellationTokenSource())))
                 throw new Exception($"Cannot track completion for MessageId = {messageId}");
 
             Monitor.Enter(_sync);
@@ -136,7 +136,7 @@ namespace NetX
                 Monitor.Exit(_sync);
             }
 
-            return await WaitForRequestAsync(_completions[messageId]);
+            return await WaitForRequestAsync(_completions[messageId].Item1, _completions[messageId].Item2);
         }
 
         public async ValueTask<ArraySegment<byte>> RequestAsync(Stream stream)
@@ -145,7 +145,7 @@ namespace NetX
                 throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
 
             var messageId = Guid.NewGuid();
-            if (!_completions.TryAdd(messageId, new TaskCompletionSource<ArraySegment<byte>>()))
+            if (!_completions.TryAdd(messageId, new (new TaskCompletionSource<ArraySegment<byte>>(), new CancellationTokenSource())))
                 throw new Exception($"Cannot track completion for MessageId = {messageId}");
 
             Monitor.Enter(_sync);
@@ -170,13 +170,14 @@ namespace NetX
                 Monitor.Exit(_sync);
             }
 
-            return await WaitForRequestAsync(_completions[messageId]);
+            return await WaitForRequestAsync(_completions[messageId].Item1, _completions[messageId].Item2);
         }
 
-        private async ValueTask<ArraySegment<byte>> WaitForRequestAsync(TaskCompletionSource<ArraySegment<byte>> source)
+        private async ValueTask<ArraySegment<byte>> WaitForRequestAsync(TaskCompletionSource<ArraySegment<byte>> source, CancellationTokenSource tokenSource)
         {
             var delayTask = Task.Delay(_options.DuplexTimeout)
-                .ContinueWith((_) => source.TrySetException(new TimeoutException()));
+                .ContinueWith((_) => source.TrySetException(new TimeoutException()))
+                .ContinueWith((_) => tokenSource.Cancel());
 
             await Task.WhenAny(delayTask, source.Task);
 
@@ -386,7 +387,7 @@ namespace NetX
 
             if (_options.Duplex && _completions.Remove(messageId, out var completion))
             {
-                return completion.TrySetResult(messageBuffer);
+                return completion.Item1.TrySetResult(messageBuffer);
             }
 
             message = new NetXMessage(messageId, _options.CopyBuffer ? messageBuffer.ToArray() : messageBuffer);
@@ -405,11 +406,11 @@ namespace NetX
                     if (result.IsCanceled || result.IsCompleted)
                         break;
 
-                    while (!cancellationToken.IsCancellationRequested && TryGetSendMessage(ref buffer, out ArraySegment<byte> sendBuff))
+                    while (!cancellationToken.IsCancellationRequested && TryGetSendMessage(ref buffer, out var sendBuff, out var sendCancellationToken))
                     {
                         if (_socket.Connected)
                         {
-                            await _socket.SendAsync(sendBuff, SocketFlags.None, cancellationToken);
+                            await _socket.SendAsync(sendBuff, SocketFlags.None, sendCancellationToken);
                         }
                     }
 
@@ -425,9 +426,10 @@ namespace NetX
             }
         }
 
-        private bool TryGetSendMessage(ref ReadOnlySequence<byte> buffer, out ArraySegment<byte> sendBuff)
+        private bool TryGetSendMessage(ref ReadOnlySequence<byte> buffer, out ArraySegment<byte> sendBuff, out CancellationToken cancellationToken)
         {
             sendBuff = default;
+            cancellationToken = default;
 
             var offset = _options.Duplex ? 0 : sizeof(int);
 
@@ -444,6 +446,12 @@ namespace NetX
                 return false;
 
             buffer.Slice(offset, size).CopyTo(_sendBuffer);
+            if (_options.Duplex)
+            {
+                var messageId = new Guid(new Span<byte>(_sendBuffer, sizeof(int), GUID_LEN));
+                if (_completions.ContainsKey(messageId))
+                    cancellationToken =  _completions[messageId].Item2.Token;
+            }
 
             sendBuff = new ArraySegment<byte>(_sendBuffer, 0, size);
 
