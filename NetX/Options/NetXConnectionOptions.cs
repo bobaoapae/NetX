@@ -6,12 +6,13 @@ namespace NetX.Options
     {
         public IPEndPoint EndPoint { get; }
         public bool NoDelay { get; }
-        public int RecvBufferSize { get; set; }
-        public int SendBufferSize { get; set; }
-        public bool Duplex { get; set; }
-        public int DuplexTimeout { get; set; }
-        public bool CopyBuffer { get; set; }
-        public int SocketTimeout { get; set; }
+        public int RecvBufferSize { get; }
+        public int SendBufferSize { get; }
+        public bool Duplex { get; }
+        public int DuplexTimeout { get; }
+        public bool CopyBuffer { get; }
+        public int SocketTimeout { get; }
+        public bool DisconnectOnTimeout { get; }
 
         public NetXConnectionOptions(
             IPEndPoint endPoint,
@@ -21,7 +22,8 @@ namespace NetX.Options
             bool duplex,
             int duplexTimeout,
             bool copyBuffer,
-            int socketTimeout)
+            int socketTimeout,
+            bool disconnectOnTimeout)
         {
             EndPoint = endPoint;
             NoDelay = noDelay;
@@ -31,6 +33,7 @@ namespace NetX.Options
             DuplexTimeout = duplexTimeout;
             CopyBuffer = copyBuffer;
             SocketTimeout = socketTimeout;
+            DisconnectOnTimeout = disconnectOnTimeout;
         }
     }
 }

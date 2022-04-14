@@ -19,7 +19,8 @@ namespace NetX.Options
             bool copyBuffer,
             bool useProxy,
             int backLog,
-            int socketTimeout) : base(
+            int socketTimeout,
+            bool disconnectOnTimeout) : base(
                 endPoint, 
                 noDelay, 
                 recvBufferSize, 
@@ -27,7 +28,8 @@ namespace NetX.Options
                 duplex,
                 duplexTimeout,
                 copyBuffer,
-                socketTimeout)
+                socketTimeout,
+                disconnectOnTimeout)
         {
             Processor = processor;
             UseProxy = useProxy;

@@ -24,8 +24,11 @@ namespace NetX
             _ = DispatchOnClientConnect();
 
             _logger?.LogInformation("{name}: Tcp client connected to {address}:{port}", _clientName, _options.EndPoint.Address, _options.EndPoint.Port);
-
-            _ = ProcessClientConnection(cancellationToken);
+            
+            _ = Task.Factory.StartNew(() =>
+            {
+                _ = ProcessClientConnection(cancellationToken);
+            }, cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         }
 
         private async Task ProcessClientConnection(CancellationToken cancellationToken)

@@ -62,7 +62,8 @@ namespace NetX.Options
                 _copyBuffer,
                 _useProxy,
                 _backlog,
-                _socketTimeout);
+                _socketTimeout,
+                _disconnectOnTimeout);
 
             return new NetXServer(options, _loggerFactory, _serverName);
         }

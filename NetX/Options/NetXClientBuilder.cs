@@ -44,7 +44,8 @@ namespace NetX.Options
                 _duplex,
                 _duplexTimeout,
                 _copyBuffer,
-                _socketTimeout);
+                _socketTimeout,
+                _disconnectOnTimeout);
 
             return new NetXClient(options, _loggerFactory, _clientName);
         }
