@@ -191,7 +191,7 @@ namespace NetX
                 .ContinueWith(_ => source.TrySetException(new TimeoutException()))
                 .ContinueWith(_ =>
                 {
-                    if(_options.DisconnectOnTimeout)
+                    if(!source.Task.IsCompleted && _options.DisconnectOnTimeout)
                         Disconnect();
                 });
 
