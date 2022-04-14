@@ -188,7 +188,12 @@ namespace NetX
         private async ValueTask<ArraySegment<byte>> WaitForRequestAsync(TaskCompletionSource<ArraySegment<byte>> source)
         {
             var delayTask = Task.Delay(_options.DuplexTimeout)
-                .ContinueWith((_) => source.TrySetException(new TimeoutException()));
+                .ContinueWith(_ => source.TrySetException(new TimeoutException()))
+                .ContinueWith(_ =>
+                {
+                    if(_options.DisconnectOnTimeout)
+                        Disconnect();
+                });
 
             await Task.WhenAny(delayTask, source.Task);
 
