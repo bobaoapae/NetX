@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using System.Net.Sockets;
 using NetX.Options;
 using Microsoft.Extensions.Logging;
+using Nito.AsyncEx;
 
 namespace NetX
 {
@@ -27,7 +28,7 @@ namespace NetX
             
             _ = Task.Factory.StartNew(() =>
             {
-                _ = ProcessClientConnection(cancellationToken);
+                AsyncContext.Run(() => ProcessClientConnection(cancellationToken));
             }, cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         }
 

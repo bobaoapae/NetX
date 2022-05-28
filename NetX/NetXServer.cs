@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using NetX.Options;
+using Nito.AsyncEx;
 
 namespace NetX
 {
@@ -79,7 +80,7 @@ namespace NetX
                         var sessionSocket = await _socket.AcceptAsync(cancellationToken);
                         _ = Task.Factory.StartNew(() =>
                         {
-                            _ = ProcessSessionConnection(sessionSocket, cancellationToken);
+                            AsyncContext.Run(() => ProcessSessionConnection(sessionSocket, cancellationToken));
                         }, cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
                     }
                     catch (SocketException socketException)
