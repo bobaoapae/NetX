@@ -336,7 +336,6 @@ namespace NetX
             finally
             {
                 await _receivePipe.Writer.CompleteAsync();
-                _receivePipe.Reader.CancelPendingRead();
                 _sendPipe.Reader.CancelPendingRead();
             }
         }
@@ -350,16 +349,18 @@ namespace NetX
                     ReadResult result = await _receivePipe.Reader.ReadAsync(cancellationToken);
                     ReadOnlySequence<byte> buffer = result.Buffer;
 
-                    if (result.IsCanceled || result.IsCompleted)
-                        break;
-
                     while (!cancellationToken.IsCancellationRequested && TryGetRecvMessage(ref buffer, out var message))
                     {
                         if (message.HasValue)
                         {
                             await OnReceivedMessageAsync(message.Value);
                         }
+                        if (result.IsCanceled || result.IsCompleted)
+                            break;
                     }
+                    
+                    if (result.IsCanceled || result.IsCompleted)
+                        break;
 
                     _receivePipe.Reader.AdvanceTo(buffer.Start, buffer.End);
                 }
