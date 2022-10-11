@@ -9,6 +9,7 @@ using NetX.Options;
 using System.Collections.Concurrent;
 using System.IO;
 using Microsoft.Extensions.Logging;
+using Nito.AsyncEx;
 
 namespace NetX
 {
@@ -31,7 +32,7 @@ namespace NetX
         private readonly bool _reuseSocket;
         private bool _isSocketDisconnectCalled;
 
-        private readonly object _sync = new();
+        private readonly AsyncLock _mutex;
 
         const int GUID_LEN = 16;
         private static readonly byte[] _emptyGuid = Guid.Empty.ToByteArray();
@@ -52,7 +53,9 @@ namespace NetX
             _completions = new ConcurrentDictionary<Guid, TaskCompletionSource<ArraySegment<byte>>>();
 
             _reuseSocket = reuseSocket;
-            
+
+            _mutex = new AsyncLock();
+
             socket.NoDelay = _options.NoDelay;
             socket.LingerState = new LingerOption(true, 5);
             socket.ReceiveTimeout = _options.SocketTimeout;
@@ -67,10 +70,10 @@ namespace NetX
         }
 
         #region Send Methods
-        public async ValueTask SendAsync(ArraySegment<byte> buffer)
+
+        public async ValueTask SendAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken = default)
         {
-            Monitor.Enter(_sync);
-            try
+            using (await _mutex.LockAsync(cancellationToken))
             {
                 _sendPipe.Writer.Write(BitConverter.GetBytes(buffer.Count + (_options.Duplex ? sizeof(int) + GUID_LEN : 0)));
 
@@ -79,23 +82,18 @@ namespace NetX
                     _sendPipe.Writer.Write(_emptyGuid);
                 }
 
-                Memory<byte> memory = _sendPipe.Writer.GetMemory(buffer.Count);
+                var memory = _sendPipe.Writer.GetMemory(buffer.Count);
                 buffer.AsMemory().CopyTo(memory);
 
                 _sendPipe.Writer.Advance(buffer.Count);
 
-                await _sendPipe.Writer.FlushAsync();
-            }
-            finally
-            {
-                Monitor.Exit(_sync);
+                await _sendPipe.Writer.FlushAsync(cancellationToken);
             }
         }
 
-        public async ValueTask SendAsync(Stream stream)
+        public async ValueTask SendAsync(Stream stream, CancellationToken cancellationToken = default)
         {
-            Monitor.Enter(_sync);
-            try
+            using (await _mutex.LockAsync(cancellationToken))
             {
                 stream.Position = 0;
 
@@ -106,21 +104,17 @@ namespace NetX
                     _sendPipe.Writer.Write(_emptyGuid);
                 }
 
-                Memory<byte> memory = _sendPipe.Writer.GetMemory((int)stream.Length);
-                int bytesRead = await stream.ReadAsync(memory);
+                var memory = _sendPipe.Writer.GetMemory((int)stream.Length);
+                var bytesRead = await stream.ReadAsync(memory, cancellationToken);
                 if (bytesRead != 0)
                 {
                     _sendPipe.Writer.Advance(bytesRead);
-                    _ = await _sendPipe.Writer.FlushAsync();
+                    _ = await _sendPipe.Writer.FlushAsync(cancellationToken);
                 }
-            }
-            finally
-            {
-                Monitor.Exit(_sync);
             }
         }
 
-        public async ValueTask<ArraySegment<byte>> RequestAsync(ArraySegment<byte> buffer)
+        public async ValueTask<ArraySegment<byte>> RequestAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken = default)
         {
             if (!_options.Duplex)
                 throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
@@ -129,29 +123,24 @@ namespace NetX
             if (!_completions.TryAdd(messageId, new TaskCompletionSource<ArraySegment<byte>>()))
                 throw new Exception($"Cannot track completion for MessageId = {messageId}");
 
-            Monitor.Enter(_sync);
-            try
+            using (await _mutex.LockAsync(cancellationToken))
             {
                 _sendPipe.Writer.Write(BitConverter.GetBytes(buffer.Count + sizeof(int) + GUID_LEN));
 
                 _sendPipe.Writer.Write(messageId.ToByteArray());
 
-                Memory<byte> memory = _sendPipe.Writer.GetMemory(buffer.Count);
+                var memory = _sendPipe.Writer.GetMemory(buffer.Count);
                 buffer.AsMemory().CopyTo(memory);
 
                 _sendPipe.Writer.Advance(buffer.Count);
 
-                await _sendPipe.Writer.FlushAsync();
-            }
-            finally
-            {
-                Monitor.Exit(_sync);
+                await _sendPipe.Writer.FlushAsync(cancellationToken);
             }
 
             return await WaitForRequestAsync(_completions[messageId]);
         }
 
-        public async ValueTask<ArraySegment<byte>> RequestAsync(Stream stream)
+        public async ValueTask<ArraySegment<byte>> RequestAsync(Stream stream, CancellationToken cancellationToken = default)
         {
             if (!_options.Duplex)
                 throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
@@ -160,8 +149,7 @@ namespace NetX
             if (!_completions.TryAdd(messageId, new TaskCompletionSource<ArraySegment<byte>>()))
                 throw new Exception($"Cannot track completion for MessageId = {messageId}");
 
-            Monitor.Enter(_sync);
-            try
+            using (await _mutex.LockAsync(cancellationToken))
             {
                 stream.Position = 0;
 
@@ -169,17 +157,13 @@ namespace NetX
 
                 _sendPipe.Writer.Write(messageId.ToByteArray());
 
-                Memory<byte> memory = _sendPipe.Writer.GetMemory((int)stream.Length);
-                int bytesRead = await stream.ReadAsync(memory);
+                var memory = _sendPipe.Writer.GetMemory((int)stream.Length);
+                var bytesRead = await stream.ReadAsync(memory, cancellationToken);
                 if (bytesRead != 0)
                 {
                     _sendPipe.Writer.Advance(bytesRead);
-                    _ = await _sendPipe.Writer.FlushAsync();
+                    _ = await _sendPipe.Writer.FlushAsync(cancellationToken);
                 }
-            }
-            finally
-            {
-                Monitor.Exit(_sync);
             }
 
             return await WaitForRequestAsync(_completions[messageId]);
@@ -191,7 +175,7 @@ namespace NetX
                 .ContinueWith(_ => source.TrySetException(new TimeoutException()))
                 .ContinueWith(_ =>
                 {
-                    if(!source.Task.IsCompleted && _options.DisconnectOnTimeout)
+                    if (!source.Task.IsCompleted && _options.DisconnectOnTimeout)
                         Disconnect();
                 });
 
@@ -200,38 +184,32 @@ namespace NetX
             return source.Task.Result;
         }
 
-        public async ValueTask ReplyAsync(Guid messageId, ArraySegment<byte> buffer)
+        public async ValueTask ReplyAsync(Guid messageId, ArraySegment<byte> buffer, CancellationToken cancellationToken = default)
         {
             if (!_options.Duplex)
                 throw new NotSupportedException($"Cannot use ReplyAsync with {nameof(_options.Duplex)} option disabled");
 
-            Monitor.Enter(_sync);
-            try
+            using (await _mutex.LockAsync(cancellationToken))
             {
                 _sendPipe.Writer.Write(BitConverter.GetBytes(buffer.Count + sizeof(int) + GUID_LEN));
 
                 _sendPipe.Writer.Write(messageId.ToByteArray());
 
-                Memory<byte> memory = _sendPipe.Writer.GetMemory(buffer.Count);
+                var memory = _sendPipe.Writer.GetMemory(buffer.Count);
                 buffer.AsMemory().CopyTo(memory);
 
                 _sendPipe.Writer.Advance(buffer.Count);
 
-                await _sendPipe.Writer.FlushAsync();
-            }
-            finally
-            {
-                Monitor.Exit(_sync);
+                await _sendPipe.Writer.FlushAsync(cancellationToken);
             }
         }
 
-        public async ValueTask ReplyAsync(Guid messageId, Stream stream)
+        public async ValueTask ReplyAsync(Guid messageId, Stream stream, CancellationToken cancellationToken = default)
         {
             if (!_options.Duplex)
                 throw new NotSupportedException($"Cannot use ReplyAsync with {nameof(_options.Duplex)} option disabled");
 
-            Monitor.Enter(_sync);
-            try
+            using (await _mutex.LockAsync(cancellationToken))
             {
                 stream.Position = 0;
 
@@ -239,19 +217,16 @@ namespace NetX
 
                 _sendPipe.Writer.Write(messageId.ToByteArray());
 
-                Memory<byte> memory = _sendPipe.Writer.GetMemory((int)stream.Length);
-                int bytesRead = await stream.ReadAsync(memory);
+                var memory = _sendPipe.Writer.GetMemory((int)stream.Length);
+                var bytesRead = await stream.ReadAsync(memory, cancellationToken);
                 if (bytesRead != 0)
                 {
                     _sendPipe.Writer.Advance(bytesRead);
-                    _ = await _sendPipe.Writer.FlushAsync();
+                    _ = await _sendPipe.Writer.FlushAsync(cancellationToken);
                 }
             }
-            finally
-            {
-                Monitor.Exit(_sync);
-            }
         }
+
         #endregion
 
         internal async Task ProcessConnection(CancellationToken cancellationToken = default)
@@ -260,6 +235,7 @@ namespace NetX
             {
                 _isSocketDisconnectCalled = false;
             }
+
             _cancellationTokenSource = new CancellationTokenSource();
             cancellationToken.Register(() => _cancellationTokenSource.Cancel());
 
@@ -288,14 +264,14 @@ namespace NetX
 
         public void Disconnect()
         {
-            if(!_cancellationTokenSource.IsCancellationRequested)
+            if (!_cancellationTokenSource.IsCancellationRequested)
                 _cancellationTokenSource.Cancel();
 
             lock (_socket)
             {
-                if(_isSocketDisconnectCalled)
+                if (_isSocketDisconnectCalled)
                     return;
-                
+
                 _isSocketDisconnectCalled = true;
                 _socket.Shutdown(SocketShutdown.Both);
                 _socket.Disconnect(_reuseSocket);
@@ -331,8 +307,12 @@ namespace NetX
                     }
                 }
             }
-            catch (SocketException) { }
-            catch (OperationCanceledException) { }
+            catch (SocketException)
+            {
+            }
+            catch (OperationCanceledException)
+            {
+            }
             finally
             {
                 await _receivePipe.Writer.CompleteAsync();
@@ -355,17 +335,20 @@ namespace NetX
                         {
                             await OnReceivedMessageAsync(message.Value);
                         }
+
                         if (result.IsCanceled || result.IsCompleted)
                             break;
                     }
-                    
+
                     if (result.IsCanceled || result.IsCompleted)
                         break;
 
                     _receivePipe.Reader.AdvanceTo(buffer.Start, buffer.End);
                 }
             }
-            catch (OperationCanceledException) { }
+            catch (OperationCanceledException)
+            {
+            }
             finally
             {
                 Disconnect();
@@ -388,7 +371,7 @@ namespace NetX
 
             var minRecvSize = Math.Min(_options.RecvBufferSize, buffer.Length);
             buffer.Slice(0, _options.Duplex ? headerOffset : minRecvSize).CopyTo(_recvBuffer);
-            
+
             var size = _options.Duplex ? BitConverter.ToInt32(_recvBuffer) : GetReceiveMessageSize(new ArraySegment<byte>(_recvBuffer, 0, (int)minRecvSize));
             var messageId = _options.Duplex ? new Guid(new Span<byte>(_recvBuffer, sizeof(int), GUID_LEN)) : Guid.Empty;
 
@@ -399,7 +382,7 @@ namespace NetX
                 return false;
 
             buffer.Slice(headerOffset, size - headerOffset).CopyTo(_recvBuffer);
-            
+
             var messageBuffer = new ArraySegment<byte>(_recvBuffer, 0, size - headerOffset);
             ProcessReceivedBuffer(in messageBuffer);
 
@@ -438,8 +421,12 @@ namespace NetX
                     _sendPipe.Reader.AdvanceTo(buffer.Start, buffer.End);
                 }
             }
-            catch (SocketException) { }
-            catch (OperationCanceledException) { }
+            catch (SocketException)
+            {
+            }
+            catch (OperationCanceledException)
+            {
+            }
             finally
             {
                 Disconnect();
