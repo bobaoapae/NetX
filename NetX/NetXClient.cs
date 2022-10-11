@@ -22,7 +22,7 @@ namespace NetX
         {
             await _socket.ConnectAsync(_options.EndPoint, cancellationToken);
 
-            _ = DispatchOnClientConnect();
+            _ = DispatchOnClientConnect(cancellationToken);
 
             _logger?.LogInformation("{name}: Tcp client connected to {address}:{port}", _clientName, _options.EndPoint.Address, _options.EndPoint.Port);
             
@@ -48,11 +48,11 @@ namespace NetX
             }
         }
 
-        private async Task DispatchOnClientConnect()
+        private async Task DispatchOnClientConnect(CancellationToken cancellationToken)
         {
             try
             {
-                await ((NetXClientOptions) _options).Processor.OnConnectedAsync(this);
+                await ((NetXClientOptions) _options).Processor.OnConnectedAsync(this, cancellationToken);
             }
             catch (Exception e)
             {
@@ -60,8 +60,8 @@ namespace NetX
             }
         }
 
-        protected override Task OnReceivedMessageAsync(NetXMessage message)
-            => ((NetXClientOptions) _options).Processor.OnReceivedMessageAsync(this, message);
+        protected override Task OnReceivedMessageAsync(NetXMessage message, CancellationToken cancellationToken)
+            => ((NetXClientOptions) _options).Processor.OnReceivedMessageAsync(this, message, cancellationToken);
 
         protected override int GetReceiveMessageSize(in ArraySegment<byte> buffer)
             => ((NetXClientOptions) _options).Processor.GetReceiveMessageSize(this, in buffer);

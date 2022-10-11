@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using NetX;
 
@@ -8,7 +9,7 @@ namespace ServerClientSample
 {
     public class SampleServerProcessor : INetXServerProcessor
     {
-        public async Task OnSessionConnectAsync(INetXSession session)
+        public async Task OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken)
         {
             Console.WriteLine($"Session {session.Id} connected. Time = {session.ConnectionTime} Address = {session.RemoteAddress}");
         }
@@ -20,7 +21,7 @@ namespace ServerClientSample
             return Task.CompletedTask;
         }
 
-        public async Task OnReceivedMessageAsync(INetXSession session, NetXMessage message)
+        public async Task OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
         {
             var random = new Random();
             var bigText = string.Join("", Enumerable.Range(0, 1004).Select(x => random.Next(9).ToString()));

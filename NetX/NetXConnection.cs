@@ -137,7 +137,7 @@ namespace NetX
                 await _sendPipe.Writer.FlushAsync(cancellationToken);
             }
 
-            return await WaitForRequestAsync(_completions[messageId]);
+            return await WaitForRequestAsync(messageId, cancellationToken);
         }
 
         public async ValueTask<ArraySegment<byte>> RequestAsync(Stream stream, CancellationToken cancellationToken = default)
@@ -166,18 +166,28 @@ namespace NetX
                 }
             }
 
-            return await WaitForRequestAsync(_completions[messageId]);
+            return await WaitForRequestAsync(messageId, cancellationToken);
         }
 
-        private async ValueTask<ArraySegment<byte>> WaitForRequestAsync(TaskCompletionSource<ArraySegment<byte>> source)
+        private async ValueTask<ArraySegment<byte>> WaitForRequestAsync(Guid taskCompletionId, CancellationToken cancellationToken)
         {
-            var delayTask = Task.Delay(_options.DuplexTimeout)
-                .ContinueWith(_ => source.TrySetException(new TimeoutException()))
+            var source = _completions[taskCompletionId];
+            var delayTask = Task.Delay(_options.DuplexTimeout, cancellationToken)
                 .ContinueWith(_ =>
                 {
-                    if (!source.Task.IsCompleted && _options.DisconnectOnTimeout)
+                    if (source.Task.IsCompleted)
+                        return;
+                    
+                    source.TrySetException(new TimeoutException());
+
+                    if (!_completions.TryRemove(taskCompletionId, out var __))
+                    {
+                        _logger?.LogError("{svrName}: Cannot remove task completion for MessageId = {msgId}", _appName, taskCompletionId);
+                    }
+                    
+                    if (_options.DisconnectOnTimeout)
                         Disconnect();
-                });
+                }, cancellationToken);
 
             await Task.WhenAny(delayTask, source.Task);
 
@@ -333,7 +343,7 @@ namespace NetX
                     {
                         if (message.HasValue)
                         {
-                            await OnReceivedMessageAsync(message.Value);
+                            await OnReceivedMessageAsync(message.Value, cancellationToken);
                         }
 
                         if (result.IsCanceled || result.IsCompleted)
@@ -477,6 +487,6 @@ namespace NetX
         {
         }
 
-        protected abstract Task OnReceivedMessageAsync(NetXMessage message);
+        protected abstract Task OnReceivedMessageAsync(NetXMessage message, CancellationToken cancellationToken);
     }
 }

@@ -120,7 +120,7 @@ namespace NetX
             {
                 if (_sessions.TryAdd(session.Id, session))
                 {
-                    _ = DispatchOnSessionConnect(session);
+                    _ = DispatchOnSessionConnect(session, cancellationToken);
                     await session.ProcessConnection(cancellationToken);
                 }
                 else
@@ -162,11 +162,11 @@ namespace NetX
             }
         }
 
-        private async Task DispatchOnSessionConnect(INetXSession session)
+        private async Task DispatchOnSessionConnect(INetXSession session, CancellationToken cancellationToken)
         {
             try
             {
-                await _options.Processor.OnSessionConnectAsync(session);
+                await _options.Processor.OnSessionConnectAsync(session, cancellationToken);
             }
             catch (Exception e)
             {

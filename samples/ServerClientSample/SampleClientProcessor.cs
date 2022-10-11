@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using NetX;
 using Serilog;
@@ -8,7 +9,7 @@ namespace ServerClientSample
 {
     public class SampleClientProcessor : INetXClientProcessor
     {
-        public async Task OnConnectedAsync(INetXClientSession client)
+        public async Task OnConnectedAsync(INetXClientSession client, CancellationToken cancellationToken)
         {
             //await client.SendAsync(Encoding.UTF8.GetBytes("Requisicao 1"));
         }
@@ -18,7 +19,7 @@ namespace ServerClientSample
             return Task.CompletedTask;
         }
 
-        public Task OnReceivedMessageAsync(INetXClientSession client, NetXMessage message)
+        public Task OnReceivedMessageAsync(INetXClientSession client, NetXMessage message, CancellationToken cancellationToken)
         {
             return Task.CompletedTask;
         }

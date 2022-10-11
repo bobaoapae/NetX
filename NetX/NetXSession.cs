@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using NetX.Options;
@@ -21,8 +22,8 @@ namespace NetX
             ConnectionTime = DateTime.UtcNow;
         }
 
-        protected override Task OnReceivedMessageAsync(NetXMessage message)
-            => ((NetXServerOptions)_options).Processor.OnReceivedMessageAsync(this, message);
+        protected override Task OnReceivedMessageAsync(NetXMessage message, CancellationToken cancellationToken)
+            => ((NetXServerOptions)_options).Processor.OnReceivedMessageAsync(this, message, cancellationToken);
 
         protected override int GetReceiveMessageSize(in ArraySegment<byte> buffer)
             => ((NetXServerOptions)_options).Processor.GetReceiveMessageSize(this, in buffer);
