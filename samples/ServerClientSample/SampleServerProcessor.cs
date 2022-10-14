@@ -4,6 +4,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using NetX;
+using Serilog;
 
 namespace ServerClientSample
 {
@@ -21,11 +22,19 @@ namespace ServerClientSample
             return Task.CompletedTask;
         }
 
-        public async Task OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
+        public Task OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
         {
-            var random = new Random();
-            var bigText = string.Join("", Enumerable.Range(0, 1004).Select(x => random.Next(9).ToString()));
-            await session.ReplyAsync(message.Id, Encoding.UTF8.GetBytes($"nicke{message.Buffer[0]}"));
+            _ = Task.Run(async () =>
+            {
+                var textMessage = Encoding.UTF8.GetString(message.Buffer);
+                Log.Debug("Received message from {SessionId} with {Message}", session.Id, textMessage);
+                var random = new Random();
+                var data = Enumerable.Range(0, 20_000_000).Select(x => (byte)random.Next(9)).ToArray();
+                Log.Debug("Sending big message to {SessionId} with lenght {Lenght}", session.Id, data.Length);
+                await session.ReplyAsync(message.Id, data, cancellationToken);
+            }, cancellationToken);
+            
+            return Task.CompletedTask;
         }
 
         public int GetReceiveMessageSize(INetXSession session, in ArraySegment<byte> buffer)

@@ -120,7 +120,7 @@ namespace NetX
                 throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
 
             var messageId = Guid.NewGuid();
-            if (!_completions.TryAdd(messageId, new TaskCompletionSource<ArraySegment<byte>>()))
+            if (!_completions.TryAdd(messageId, new TaskCompletionSource<ArraySegment<byte>>(TaskCreationOptions.RunContinuationsAsynchronously)))
                 throw new Exception($"Cannot track completion for MessageId = {messageId}");
 
             using (await _mutex.LockAsync(cancellationToken))
@@ -162,7 +162,7 @@ namespace NetX
                 if (bytesRead != 0)
                 {
                     _sendPipe.Writer.Advance(bytesRead);
-                    _ = await _sendPipe.Writer.FlushAsync(cancellationToken);
+                    await _sendPipe.Writer.FlushAsync(cancellationToken);
                 }
             }
 
@@ -177,14 +177,14 @@ namespace NetX
                 {
                     if (source.Task.IsCompleted)
                         return;
-                    
+
                     source.TrySetException(new TimeoutException());
 
                     if (!_completions.TryRemove(taskCompletionId, out var __))
                     {
                         _logger?.LogError("{svrName}: Cannot remove task completion for MessageId = {msgId}", _appName, taskCompletionId);
                     }
-                    
+
                     if (_options.DisconnectOnTimeout)
                         Disconnect();
                 }, cancellationToken);
@@ -232,7 +232,7 @@ namespace NetX
                 if (bytesRead != 0)
                 {
                     _sendPipe.Writer.Advance(bytesRead);
-                    _ = await _sendPipe.Writer.FlushAsync(cancellationToken);
+                    await _sendPipe.Writer.FlushAsync(cancellationToken);
                 }
             }
         }
@@ -339,7 +339,7 @@ namespace NetX
                     ReadResult result = await _receivePipe.Reader.ReadAsync(cancellationToken);
                     ReadOnlySequence<byte> buffer = result.Buffer;
 
-                    while (!cancellationToken.IsCancellationRequested && TryGetRecvMessage(ref buffer, out var message))
+                    while (!cancellationToken.IsCancellationRequested && await TryGetRecvMessage(ref buffer, out var message))
                     {
                         if (message.HasValue)
                         {
@@ -366,7 +366,7 @@ namespace NetX
             }
         }
 
-        private bool TryGetRecvMessage(ref ReadOnlySequence<byte> buffer, out NetXMessage? message)
+        private Task<bool> TryGetRecvMessage(ref ReadOnlySequence<byte> buffer, out NetXMessage? message)
         {
             message = null;
 
@@ -374,7 +374,7 @@ namespace NetX
 
             if (buffer.IsEmpty || (_options.Duplex && buffer.Length < DUPLEX_HEADER_SIZE))
             {
-                return false;
+                return Task.FromResult(false);
             }
 
             var headerOffset = _options.Duplex ? DUPLEX_HEADER_SIZE : 0;
@@ -389,7 +389,7 @@ namespace NetX
                 throw new Exception($"Recv Buffer is too small. RecvBuffLen = {_options.RecvBufferSize} ReceivedLen = {size}");
 
             if (size > buffer.Length)
-                return false;
+                return Task.FromResult(false);
 
             buffer.Slice(headerOffset, size - headerOffset).CopyTo(_recvBuffer);
 
@@ -399,13 +399,22 @@ namespace NetX
             var next = buffer.GetPosition(size);
             buffer = buffer.Slice(next);
 
+            var resultBuffer = _options.CopyBuffer ? messageBuffer.ToArray() : messageBuffer;
+
             if (_options.Duplex && _completions.Remove(messageId, out var completion))
             {
-                return completion.TrySetResult(messageBuffer);
+                //If set result fails, it means that the message was received but the completion source was canceled or timed out. So we just log and ignore it.
+                if (!completion.TrySetResult(resultBuffer))
+                {
+                    _logger?.LogError("{appName}: Failed to set duplex completion result. MessageId = {msgId}", _appName, messageId);
+                    return completion.Task.ContinueWith(_ => true);
+                }
+
+                return Task.FromResult(true);
             }
 
-            message = new NetXMessage(messageId, _options.CopyBuffer ? messageBuffer.ToArray() : messageBuffer);
-            return true;
+            message = new NetXMessage(messageId, resultBuffer);
+            return Task.FromResult(true);
         }
 
         private async Task SendPipeAsync(CancellationToken cancellationToken)

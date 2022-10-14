@@ -34,8 +34,8 @@ namespace ServerClientSample
                 .Duplex(true)
                 .CopyBuffer(true)
                 .NoDelay(true)
-                .ReceiveBufferSize(1024)
-                .SendBufferSize(1024)
+                .ReceiveBufferSize(20000020)
+                .SendBufferSize(20000020)
                 .Build();
 
             _server.Listen(cancellationTokenSource.Token);
@@ -46,55 +46,54 @@ namespace ServerClientSample
                 .Duplex(true)
                 .CopyBuffer(true)
                 .NoDelay(true)
-                .ReceiveBufferSize(1024)
-                .SendBufferSize(1024)
+                .ReceiveBufferSize(20000020)
+                .SendBufferSize(20000020)
                 .Build();
 
             await _client.ConnectAsync(cancellationTokenSource.Token);
 
             try
             {
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
-                //_ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
+                _ = _client.RequestAsync(new byte[] { 0x01 });
                 _ = _client.RequestAsync(new byte[] { 0x01 });
                 _ = _client.RequestAsync(new byte[] { 0x01 });
 
                 var response = await _client.RequestAsync(new byte[] { 0x03 });
-                var recebeu = Encoding.UTF8.GetString(response);
-                Log.Information("Received from server: {msg}", recebeu);
+                Log.Information("Received from server: {msg}", response.Count);
             }
             catch (Exception ex)
             {
