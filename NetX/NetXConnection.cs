@@ -120,7 +120,8 @@ namespace NetX
                 throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
 
             var messageId = Guid.NewGuid();
-            if (!_completions.TryAdd(messageId, new TaskCompletionSource<ArraySegment<byte>>(TaskCreationOptions.RunContinuationsAsynchronously)))
+            var completion = new TaskCompletionSource<ArraySegment<byte>>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_completions.TryAdd(messageId, completion))
                 throw new Exception($"Cannot track completion for MessageId = {messageId}");
 
             using (await _mutex.LockAsync(cancellationToken))
@@ -137,7 +138,7 @@ namespace NetX
                 await _sendPipe.Writer.FlushAsync(cancellationToken);
             }
 
-            return await WaitForRequestAsync(messageId, cancellationToken);
+            return await WaitForRequestAsync(messageId, completion, cancellationToken);
         }
 
         public async ValueTask<ArraySegment<byte>> RequestAsync(Stream stream, CancellationToken cancellationToken = default)
@@ -146,7 +147,8 @@ namespace NetX
                 throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
 
             var messageId = Guid.NewGuid();
-            if (!_completions.TryAdd(messageId, new TaskCompletionSource<ArraySegment<byte>>()))
+            var completion = new TaskCompletionSource<ArraySegment<byte>>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_completions.TryAdd(messageId, completion))
                 throw new Exception($"Cannot track completion for MessageId = {messageId}");
 
             using (await _mutex.LockAsync(cancellationToken))
@@ -166,12 +168,11 @@ namespace NetX
                 }
             }
 
-            return await WaitForRequestAsync(messageId, cancellationToken);
+            return await WaitForRequestAsync(messageId, completion, cancellationToken);
         }
 
-        private async ValueTask<ArraySegment<byte>> WaitForRequestAsync(Guid taskCompletionId, CancellationToken cancellationToken)
+        private async ValueTask<ArraySegment<byte>> WaitForRequestAsync(Guid taskCompletionId, TaskCompletionSource<ArraySegment<byte>> source, CancellationToken cancellationToken)
         {
-            var source = _completions[taskCompletionId];
             var delayTask = Task.Delay(_options.DuplexTimeout, cancellationToken)
                 .ContinueWith(_ =>
                 {
@@ -401,7 +402,7 @@ namespace NetX
 
             var resultBuffer = _options.CopyBuffer ? messageBuffer.ToArray() : messageBuffer;
 
-            if (_options.Duplex && _completions.Remove(messageId, out var completion))
+            if (_options.Duplex && _completions.TryRemove(messageId, out var completion))
             {
                 //If set result fails, it means that the message was received but the completion source was canceled or timed out. So we just log and ignore it.
                 if (!completion.TrySetResult(resultBuffer))
