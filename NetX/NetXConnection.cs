@@ -3,7 +3,6 @@ using System.Threading.Tasks;
 using System.Net.Sockets;
 using System.IO.Pipelines;
 using System.Buffers;
-using System.Collections.Generic;
 using System;
 using NetX.Options;
 using System.Collections.Concurrent;
@@ -36,7 +35,6 @@ namespace NetX
 
         const int GUID_LEN = 16;
         private static readonly byte[] _emptyGuid = Guid.Empty.ToByteArray();
-        private static readonly ArrayPool<byte> _bufferPool = ArrayPool<byte>.Shared;
 
         public bool IsConnected => _socket?.Connected ?? false;
 
@@ -73,6 +71,9 @@ namespace NetX
 
         public async ValueTask SendAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken = default)
         {
+            if (cancellationToken.IsCancellationRequested)
+                return;
+
             using (await _mutex.LockAsync(cancellationToken))
             {
                 _sendPipe.Writer.Write(BitConverter.GetBytes(buffer.Count + (_options.Duplex ? sizeof(int) + GUID_LEN : 0)));
@@ -93,6 +94,9 @@ namespace NetX
 
         public async ValueTask SendAsync(Stream stream, CancellationToken cancellationToken = default)
         {
+            if (cancellationToken.IsCancellationRequested)
+                return;
+
             using (await _mutex.LockAsync(cancellationToken))
             {
                 stream.Position = 0;
@@ -118,6 +122,9 @@ namespace NetX
         {
             if (!_options.Duplex)
                 throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
+
+            if (cancellationToken.IsCancellationRequested)
+                throw new OperationCanceledException();
 
             var messageId = Guid.NewGuid();
             var completion = new TaskCompletionSource<ArraySegment<byte>>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -145,6 +152,9 @@ namespace NetX
         {
             if (!_options.Duplex)
                 throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
+
+            if (cancellationToken.IsCancellationRequested)
+                throw new OperationCanceledException();
 
             var messageId = Guid.NewGuid();
             var completion = new TaskCompletionSource<ArraySegment<byte>>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -200,6 +210,9 @@ namespace NetX
             if (!_options.Duplex)
                 throw new NotSupportedException($"Cannot use ReplyAsync with {nameof(_options.Duplex)} option disabled");
 
+            if (cancellationToken.IsCancellationRequested)
+                return;
+
             using (await _mutex.LockAsync(cancellationToken))
             {
                 _sendPipe.Writer.Write(BitConverter.GetBytes(buffer.Count + sizeof(int) + GUID_LEN));
@@ -219,6 +232,9 @@ namespace NetX
         {
             if (!_options.Duplex)
                 throw new NotSupportedException($"Cannot use ReplyAsync with {nameof(_options.Duplex)} option disabled");
+
+            if (cancellationToken.IsCancellationRequested)
+                return;
 
             using (await _mutex.LockAsync(cancellationToken))
             {
@@ -250,10 +266,10 @@ namespace NetX
             _cancellationTokenSource = new CancellationTokenSource();
             cancellationToken.Register(() => _cancellationTokenSource.Cancel());
 
-            _recvBuffer = _bufferPool.Rent(_options.RecvBufferSize + sizeof(int));
+            _recvBuffer = ArrayPool<byte>.Shared.Rent(_options.RecvBufferSize + sizeof(int));
             try
             {
-                _sendBuffer = _bufferPool.Rent(_options.SendBufferSize + sizeof(int));
+                _sendBuffer = ArrayPool<byte>.Shared.Rent(_options.SendBufferSize + sizeof(int));
                 try
                 {
                     var writing = FillPipeAsync(_cancellationTokenSource.Token);
@@ -264,12 +280,12 @@ namespace NetX
                 }
                 finally
                 {
-                    _bufferPool.Return(_sendBuffer, true);
+                    ArrayPool<byte>.Shared.Return(_sendBuffer, true);
                 }
             }
             finally
             {
-                _bufferPool.Return(_recvBuffer, true);
+                ArrayPool<byte>.Shared.Return(_recvBuffer, true);
             }
         }
 
