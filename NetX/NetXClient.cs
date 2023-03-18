@@ -1,10 +1,9 @@
 ﻿using System;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Net.Sockets;
-using NetX.Options;
 using Microsoft.Extensions.Logging;
-using Nito.AsyncEx;
+using NetX.Options;
 
 namespace NetX
 {
@@ -25,11 +24,8 @@ namespace NetX
             _ = DispatchOnClientConnect(cancellationToken);
 
             _logger?.LogInformation("{name}: Tcp client connected to {address}:{port}", _clientName, _options.EndPoint.Address, _options.EndPoint.Port);
-            
-            _ = Task.Factory.StartNew(() =>
-            {
-                AsyncContext.Run(() => ProcessClientConnection(cancellationToken));
-            }, cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+            _ = Task.Factory.StartNew(() => ProcessClientConnection(cancellationToken), cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         }
 
         private async Task ProcessClientConnection(CancellationToken cancellationToken)
@@ -44,7 +40,7 @@ namespace NetX
             }
             finally
             {
-                await ((NetXClientOptions) _options).Processor.OnDisconnectedAsync();
+                await ((NetXClientOptions)_options).Processor.OnDisconnectedAsync();
             }
         }
 
@@ -52,7 +48,7 @@ namespace NetX
         {
             try
             {
-                await ((NetXClientOptions) _options).Processor.OnConnectedAsync(this, cancellationToken);
+                await ((NetXClientOptions)_options).Processor.OnConnectedAsync(this, cancellationToken);
             }
             catch (Exception e)
             {
@@ -61,15 +57,15 @@ namespace NetX
         }
 
         protected override Task OnReceivedMessageAsync(NetXMessage message, CancellationToken cancellationToken)
-            => ((NetXClientOptions) _options).Processor.OnReceivedMessageAsync(this, message, cancellationToken);
+            => ((NetXClientOptions)_options).Processor.OnReceivedMessageAsync(this, message, cancellationToken);
 
         protected override int GetReceiveMessageSize(in ArraySegment<byte> buffer)
-            => ((NetXClientOptions) _options).Processor.GetReceiveMessageSize(this, in buffer);
+            => ((NetXClientOptions)_options).Processor.GetReceiveMessageSize(this, in buffer);
 
         protected override void ProcessReceivedBuffer(in ArraySegment<byte> buffer)
-            => ((NetXClientOptions) _options).Processor.ProcessReceivedBuffer(this, in buffer);
+            => ((NetXClientOptions)_options).Processor.ProcessReceivedBuffer(this, in buffer);
 
         protected override void ProcessSendBuffer(in ArraySegment<byte> buffer)
-            => ((NetXClientOptions) _options).Processor.ProcessSendBuffer(this, in buffer);
+            => ((NetXClientOptions)_options).Processor.ProcessSendBuffer(this, in buffer);
     }
 }

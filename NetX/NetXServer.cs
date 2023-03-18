@@ -42,7 +42,7 @@ namespace NetX
             _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, options.SendBufferSize);
             _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveTimeout, options.SocketTimeout);
             _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendTimeout, options.SocketTimeout);
-            
+
             _options = options;
             _sessions = new ConcurrentDictionary<Guid, INetXSession>();
         }
@@ -63,10 +63,7 @@ namespace NetX
 
             _logger?.LogInformation("{svrName}: Tcp server listening on {ip}:{port}", _serverName, _options.EndPoint.Address, _options.EndPoint.Port);
 
-            _ = Task.Factory.StartNew(() =>
-            {
-                _ = StartAcceptAsync(cancellationToken);
-            }, cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            _ = Task.Factory.StartNew(() => { _ = StartAcceptAsync(cancellationToken); }, cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         }
 
         private async Task StartAcceptAsync(CancellationToken cancellationToken)
@@ -78,10 +75,7 @@ namespace NetX
                     try
                     {
                         var sessionSocket = await _socket.AcceptAsync(cancellationToken);
-                        _ = Task.Factory.StartNew(() =>
-                        {
-                            AsyncContext.Run(() => ProcessSessionConnection(sessionSocket, cancellationToken));
-                        }, cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                        _ = Task.Factory.StartNew(() => ProcessSessionConnection(sessionSocket, cancellationToken), cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
                     }
                     catch (SocketException socketException)
                     {
@@ -97,7 +91,9 @@ namespace NetX
                 foreach (var session in _sessions.Values)
                     session.Disconnect();
             }
-            catch (OperationCanceledException) { }
+            catch (OperationCanceledException)
+            {
+            }
             catch (Exception ex)
             {
                 _logger?.LogCritical(ex, "{svrName}: An exception was throw on listen pipe", _serverName);
@@ -158,6 +154,7 @@ namespace NetX
                 {
                     _logger?.LogCritical("{svrName}: Fail on remove Session {sessId} from sessions dictionary", _serverName, session.Id);
                 }
+
                 sessionSocket.Close(1);
             }
         }
