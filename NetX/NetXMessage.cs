@@ -5,12 +5,12 @@ namespace NetX
     public readonly struct NetXMessage
     {
         public Guid Id { get; }
-        public ArraySegment<byte> Buffer { get; }
+        public ReadOnlyMemory<byte> Buffer { get; }
 
-        public NetXMessage(Guid id, ArraySegment<byte> message)
+        public NetXMessage(Guid id, ReadOnlyMemory<byte> buffer)
         {
             Id = id;
-            Buffer = message;
+            Buffer = buffer;
         }
     }
 }

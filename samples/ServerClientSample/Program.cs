@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using NetX;
 using NetX.Options;
 using Serilog;
+using static System.Net.Mime.MediaTypeNames;
 
 namespace ServerClientSample
 {
@@ -52,60 +53,19 @@ namespace ServerClientSample
 
             await _client.ConnectAsync(cancellationTokenSource.Token);
 
-            try
+            for (byte i = 0; i < byte.MaxValue; i++)
             {
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-                _ = _client.RequestAsync(new byte[] { 0x01 });
-
-                var response = await _client.RequestAsync(new byte[] { 0x03 });
-                Log.Information("Received from server: {msg}", response.Count);
+                byte value = i;
+                _ = Task.Run(async () =>
+                {
+                    var respon = await _client.RequestAsync(new byte[] { value });
+                    await Task.Delay(100);
+                    Log.Information("Received delayed response: {resp}", respon.Array);
+                });
             }
-            catch (Exception ex)
-            {
 
-                throw;
-            }
-            
-
-            //for (var i = 0; i < 3; i++)
-            //{
-            //    _ = 
-            //}
+            var response = await _client.RequestAsync(new byte[] { 255 });
+            Log.Information("Response request: {resp}", response);
 
             while (!cancellationTokenSource.IsCancellationRequested)
             {

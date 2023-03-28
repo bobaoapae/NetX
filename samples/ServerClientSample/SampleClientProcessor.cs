@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using NetX;
@@ -9,31 +8,31 @@ namespace ServerClientSample
 {
     public class SampleClientProcessor : INetXClientProcessor
     {
-        public async Task OnConnectedAsync(INetXClientSession client, CancellationToken cancellationToken)
+        public int GetReceiveMessageSize(INetXClientSession client, in ReadOnlyMemory<byte> buffer)
         {
-            //await client.SendAsync(Encoding.UTF8.GetBytes("Requisicao 1"));
+            return default;
         }
 
-        public Task OnDisconnectedAsync()
+        public ValueTask OnConnectedAsync(INetXClientSession client, CancellationToken cancellationToken)
         {
-            return Task.CompletedTask;
+            return ValueTask.CompletedTask;
         }
 
-        public Task OnReceivedMessageAsync(INetXClientSession client, NetXMessage message, CancellationToken cancellationToken)
+        public ValueTask OnDisconnectedAsync()
         {
-            return Task.CompletedTask;
+            return ValueTask.CompletedTask;
         }
 
-        public int GetReceiveMessageSize(INetXClientSession client, in ArraySegment<byte> buffer)
+        public ValueTask OnReceivedMessageAsync(INetXClientSession client, NetXMessage message, CancellationToken cancellationToken)
         {
-            return 4;
+            return ValueTask.CompletedTask;
         }
 
-        public void ProcessReceivedBuffer(INetXClientSession client, in ArraySegment<byte> buffer)
+        public void ProcessReceivedBuffer(INetXClientSession client, in ReadOnlyMemory<byte> buffer)
         {
         }
 
-        public void ProcessSendBuffer(INetXClientSession client, in ArraySegment<byte> buffer)
+        public void ProcessSendBuffer(INetXClientSession client, in ReadOnlyMemory<byte> buffer)
         {
         }
     }

@@ -56,16 +56,16 @@ namespace NetX
             }
         }
 
-        protected override Task OnReceivedMessageAsync(NetXMessage message, CancellationToken cancellationToken)
+        protected override ValueTask OnReceivedMessageAsync(NetXMessage message, CancellationToken cancellationToken)
             => ((NetXClientOptions)_options).Processor.OnReceivedMessageAsync(this, message, cancellationToken);
 
-        protected override int GetReceiveMessageSize(in ArraySegment<byte> buffer)
+        protected override int GetReceiveMessageSize(in ReadOnlyMemory<byte> buffer)
             => ((NetXClientOptions)_options).Processor.GetReceiveMessageSize(this, in buffer);
 
-        protected override void ProcessReceivedBuffer(in ArraySegment<byte> buffer)
+        protected override void ProcessReceivedBuffer(in ReadOnlyMemory<byte> buffer)
             => ((NetXClientOptions)_options).Processor.ProcessReceivedBuffer(this, in buffer);
 
-        protected override void ProcessSendBuffer(in ArraySegment<byte> buffer)
+        protected override void ProcessSendBuffer(in ReadOnlyMemory<byte> buffer)
             => ((NetXClientOptions)_options).Processor.ProcessSendBuffer(this, in buffer);
     }
 }

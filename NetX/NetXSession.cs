@@ -22,19 +22,19 @@ namespace NetX
             ConnectionTime = DateTime.UtcNow;
         }
 
-        protected override Task OnReceivedMessageAsync(NetXMessage message, CancellationToken cancellationToken)
+        protected override ValueTask OnReceivedMessageAsync(NetXMessage message, CancellationToken cancellationToken)
             => ((NetXServerOptions)_options).Processor.OnReceivedMessageAsync(this, message, cancellationToken);
 
-        protected override int GetReceiveMessageSize(in ArraySegment<byte> buffer)
+        protected override int GetReceiveMessageSize(in ReadOnlyMemory<byte> buffer)
             => ((NetXServerOptions)_options).Processor.GetReceiveMessageSize(this, in buffer);
 
-        protected override void ProcessReceivedBuffer(in ArraySegment<byte> buffer)
+        protected override void ProcessReceivedBuffer(in ReadOnlyMemory<byte> buffer)
         {
             ((NetXServerOptions)_options).Processor.ProcessReceivedBuffer(this, in buffer);
             base.ProcessReceivedBuffer(buffer);
         }
 
-        protected override void ProcessSendBuffer(in ArraySegment<byte> buffer)
+        protected override void ProcessSendBuffer(in ReadOnlyMemory<byte> buffer)
         {
             ((NetXServerOptions)_options).Processor.ProcessSendBuffer(this, in buffer);
             base.ProcessSendBuffer(buffer);

@@ -6,12 +6,12 @@ namespace NetX
 {
     public interface INetXServerProcessor
     {
-        Task OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken);
-        Task OnSessionDisconnectAsync(Guid sessionId);
-        Task OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken);
+        ValueTask OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken);
+        ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken);
+        ValueTask OnSessionDisconnectAsync(Guid sessionId);
 
-        int GetReceiveMessageSize(INetXSession session, in ArraySegment<byte> buffer);
-        void ProcessReceivedBuffer(INetXSession session, in ArraySegment<byte> buffer);
-        void ProcessSendBuffer(INetXSession session, in ArraySegment<byte> buffer);
+        int GetReceiveMessageSize(INetXSession session, in ReadOnlyMemory<byte> buffer);
+        void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer);
+        void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer);
     }
 }

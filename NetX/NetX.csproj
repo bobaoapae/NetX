@@ -18,9 +18,9 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <PackageReference Include="ByteSize" Version="2.1.1" />
+        <PackageReference Include="CommunityToolkit.HighPerformance" Version="8.1.0" />
         <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="6.0.0" />
-        <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
-        <PackageReference Include="Nito.AsyncEx.Context" Version="5.1.2" />
         <PackageReference Include="System.IO.Pipelines" Version="6.0.2" />
         <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.1.1" PrivateAssets="All" />
     </ItemGroup>
