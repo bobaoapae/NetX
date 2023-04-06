@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using System.Net.Sockets;
 using System.IO.Pipelines;
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using NetX.Options;
 using CommunityToolkit.HighPerformance.Buffers;
@@ -131,7 +132,7 @@ namespace NetX
             }
         }
 
-        public async ValueTask<ArraySegment<byte>> RequestAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken = default)
+        public async Task<ArraySegment<byte>> RequestAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken = default)
         {
             if (!_options.Duplex)
                 throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
@@ -166,7 +167,7 @@ namespace NetX
             return await WaitForRequestAsync(messageId, completion, cancellationToken);
         }
 
-        public async ValueTask<ArraySegment<byte>> RequestAsync(Stream stream, CancellationToken cancellationToken = default)
+        public async Task<ArraySegment<byte>> RequestAsync(Stream stream, CancellationToken cancellationToken = default)
         {
             if (!_options.Duplex)
                 throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
@@ -204,7 +205,7 @@ namespace NetX
             return await WaitForRequestAsync(messageId, completion, cancellationToken);
         }
 
-        private async ValueTask<ArraySegment<byte>> WaitForRequestAsync(Guid taskCompletionId, TaskCompletionSource<ArraySegment<byte>> source, CancellationToken cancellationToken)
+        private async Task<ArraySegment<byte>> WaitForRequestAsync(Guid taskCompletionId, TaskCompletionSource<ArraySegment<byte>> source, CancellationToken cancellationToken)
         {
             var delayTask = Task.Delay(_options.DuplexTimeout, cancellationToken)
                 .ContinueWith(_ =>
@@ -443,6 +444,8 @@ namespace NetX
                 {
                     _logger?.LogError("{appName}: Failed to set duplex completion result. MessageId = {msgId}", _appName, messageId);
                 }
+
+                return false;
             }
 
             return true;
