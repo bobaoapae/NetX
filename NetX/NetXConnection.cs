@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using System.IO;
 using System.IO.Pipelines;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.HighPerformance.Buffers;
@@ -133,13 +134,15 @@ namespace NetX
         public async Task<ArraySegment<byte>> RequestAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken = default)
         {
             if (!_options.Duplex)
-                throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
+                throw new NotSupportedException(
+                    $"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
 
             if (cancellationToken.IsCancellationRequested)
                 throw new OperationCanceledException();
 
             var messageId = Guid.NewGuid();
-            var completion = new TaskCompletionSource<ArraySegment<byte>>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var completion =
+                new TaskCompletionSource<ArraySegment<byte>>(TaskCreationOptions.RunContinuationsAsynchronously);
             if (!_completions.TryAdd(messageId, completion))
                 throw new Exception($"Cannot track completion for MessageId = {messageId}");
 
@@ -210,34 +213,32 @@ namespace NetX
             return await WaitForRequestAsync(messageId, completion, cancellationToken);
         }
 
-        private async Task<ArraySegment<byte>> WaitForRequestAsync(Guid taskCompletionId, TaskCompletionSource<ArraySegment<byte>> source, CancellationToken cancellationToken)
+        private Task<ArraySegment<byte>> WaitForRequestAsync(Guid taskCompletionId, TaskCompletionSource<ArraySegment<byte>> source, CancellationToken cancellationToken)
         {
-            var delayTask = Task.Delay(_options.DuplexTimeout, cancellationToken)
-                .ContinueWith(_ =>
+            var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, new CancellationTokenSource(_options.DuplexTimeout).Token);
+            timeoutCancellation.Token.Register(() =>
+            {
+                if (source.Task.IsCompleted)
+                    return;
+
+                source.SetException(new TimeoutException());
+
+                if (!_completions.TryRemove(taskCompletionId, out var __))
                 {
-                    if (source.Task.IsCompleted)
-                        return;
+                    _logger?.LogError("{svrName}: Cannot remove task completion for MessageId = {msgId} after timeout", _appName, taskCompletionId);
+                }
 
-                    source.TrySetException(new TimeoutException());
-
-                    if (!_completions.TryRemove(taskCompletionId, out var __))
-                    {
-                        _logger?.LogError("{svrName}: Cannot remove task completion for MessageId = {msgId}", _appName, taskCompletionId);
-                    }
-
-                    if (_options.DisconnectOnTimeout)
-                        Disconnect();
-                }, cancellationToken);
-
-            await Task.WhenAny(delayTask, source.Task);
-
-            return source.Task.Result;
+                if (_options.DisconnectOnTimeout)
+                    Disconnect();
+            });
+            return source.Task;
         }
 
         public async ValueTask ReplyAsync(Guid messageId, ArraySegment<byte> buffer, CancellationToken cancellationToken = default)
         {
             if (!_options.Duplex)
-                throw new NotSupportedException($"Cannot use ReplyAsync with {nameof(_options.Duplex)} option disabled");
+                throw new NotSupportedException(
+                    $"Cannot use ReplyAsync with {nameof(_options.Duplex)} option disabled");
 
             if (cancellationToken.IsCancellationRequested)
                 return;
@@ -268,7 +269,8 @@ namespace NetX
         public async ValueTask ReplyAsync(Guid messageId, Stream stream, CancellationToken cancellationToken = default)
         {
             if (!_options.Duplex)
-                throw new NotSupportedException($"Cannot use ReplyAsync with {nameof(_options.Duplex)} option disabled");
+                throw new NotSupportedException(
+                    $"Cannot use ReplyAsync with {nameof(_options.Duplex)} option disabled");
 
             if (cancellationToken.IsCancellationRequested)
                 return;
@@ -390,6 +392,23 @@ namespace NetX
 
                     while (!cancellationToken.IsCancellationRequested && TryGetReceivedMessage(ref buffer, recvBuffer, out var message))
                     {
+                        if (_options.Duplex && message.Id != Guid.Empty && _completions.TryRemove(message.Id, out var completion))
+                        {
+                            //If set result fails, it means that the message was received but the completion source was canceled or timed out. So we just log and ignore it.
+                            if (!MemoryMarshal.TryGetArray(message.Buffer, out var arraySegment))
+                            {
+                                _logger?.LogError("{appName}: Failed to get array segment from duplex message. MessageId = {msgId}", _appName, message.Id);
+                                continue;
+                            }
+
+                            if (!completion.TrySetResult(arraySegment))
+                            {
+                                _logger?.LogError("{appName}: Failed to set duplex completion result. MessageId = {msgId}", _appName, message.Id);
+                            }
+
+                            continue;
+                        }
+
                         await OnReceivedMessageAsync(message, cancellationToken);
 
                         if (result.IsCanceled || result.IsCompleted)
@@ -433,7 +452,8 @@ namespace NetX
             var messageId = _options.Duplex ? new Guid(recvBuffer.Span.Slice(4, 16)) : Guid.Empty;
 
             if (size > _options.RecvBufferSize)
-                throw new Exception($"Recv Buffer is too small. RecvBuffLen = {_options.RecvBufferSize} ReceivedLen = {size}");
+                throw new Exception(
+                    $"Recv Buffer is too small. RecvBuffLen = {_options.RecvBufferSize} ReceivedLen = {size}");
 
             if (size > buffer.Length)
                 return false;
@@ -447,17 +467,6 @@ namespace NetX
             buffer = buffer.Slice(next);
 
             netXMessage = new NetXMessage(messageId, _options.CopyBuffer ? messageBuffer.ToArray() : messageBuffer);
-
-            if (_options.Duplex && _completions.TryRemove(messageId, out var completion))
-            {
-                //If set result fails, it means that the message was received but the completion source was canceled or timed out. So we just log and ignore it.
-                if (!completion.TrySetResult(new ArraySegment<byte>(messageBuffer.ToArray())))
-                {
-                    _logger?.LogError("{appName}: Failed to set duplex completion result. MessageId = {msgId}", _appName, messageId);
-                }
-
-                return false;
-            }
 
             return true;
         }

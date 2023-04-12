@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -35,6 +36,7 @@ namespace ServerClientSample
                 .Duplex(true)
                 .CopyBuffer(true)
                 .NoDelay(true)
+                .SocketTimeout(1000)
                 .ReceiveBufferSize(20000020)
                 .SendBufferSize(20000020)
                 .Build();
@@ -47,25 +49,63 @@ namespace ServerClientSample
                 .Duplex(true)
                 .CopyBuffer(true)
                 .NoDelay(true)
+                .SocketTimeout(1000)
                 .ReceiveBufferSize(20000020)
                 .SendBufferSize(20000020)
                 .Build();
 
             await _client.ConnectAsync(cancellationTokenSource.Token);
 
-            for (byte i = 0; i < byte.MaxValue; i++)
+            var responses = new bool[byte.MaxValue];
+
+            for (byte i = 1; i < byte.MaxValue; i++)
             {
                 byte value = i;
                 _ = Task.Run(async () =>
                 {
-                    var respon = await _client.RequestAsync(new byte[] { value });
-                    await Task.Delay(100);
-                    Log.Information("Received delayed response: {resp}", respon.Array);
+                    try
+                    {
+                        var respon = await _client.RequestAsync(new byte[] { value });
+                        responses[value] = true;
+                        await Task.Delay(100);
+                        Log.Information("Received delayed response: {resp}", respon.Array);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, "Error");
+                    }
                 });
             }
 
+            _ = Task.Run(async () =>
+            {
+                while (!cancellationTokenSource.IsCancellationRequested)
+                {
+                    if (!responses.All(x => x))
+                    {
+                        Log.Information("Waiting for responses");
+                        await Task.Delay(1000);
+                    }
+                    else
+                    {
+                        Log.Information("All responses received");
+                        break;
+                    }
+                }
+            });
+
             var response = await _client.RequestAsync(new byte[] { 255 });
             Log.Information("Response request: {resp}", response);
+
+            try
+            {
+                await _client.RequestAsync(new byte[] { 0 });
+            }
+            catch (Exception ex)
+            {
+                responses[0] = true;
+                Log.Error(ex, "Success timeout error");
+            }
 
             while (!cancellationTokenSource.IsCancellationRequested)
             {
@@ -89,10 +129,7 @@ namespace ServerClientSample
             {
                 while (!_token.IsCancellationRequested)
                 {
-                    
-
                     //Console.WriteLine($"Received Response: {response.Array[0]}");
-
                 }
             }
             catch (Exception ex)

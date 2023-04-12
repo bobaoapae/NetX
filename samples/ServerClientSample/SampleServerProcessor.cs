@@ -20,6 +20,8 @@ namespace ServerClientSample
             var responseMess = message.Buffer.ToArray();
             var textMessage = Encoding.UTF8.GetString(message.Buffer.Span);
             var token = cancellationToken;
+            if(responseMess[0] == 0)
+                return;
             await session.ReplyAsync(messageId, responseMess, token);
         }
 
