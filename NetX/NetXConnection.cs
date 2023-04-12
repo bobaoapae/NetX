@@ -1,15 +1,14 @@
 ﻿using System;
-using System.IO;
 using System.Buffers;
+using System.Collections.Concurrent;
+using System.IO;
+using System.IO.Pipelines;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Net.Sockets;
-using System.IO.Pipelines;
-using System.Collections.Concurrent;
-using System.Runtime.InteropServices;
+using CommunityToolkit.HighPerformance.Buffers;
 using Microsoft.Extensions.Logging;
 using NetX.Options;
-using CommunityToolkit.HighPerformance.Buffers;
 
 namespace NetX
 {
@@ -76,12 +75,9 @@ namespace NetX
             await _semaphore.WaitAsync(cancellationToken);
             try
             {
-                // Campo int
-
-                int valor = 12;
-                BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), valor);
-
-                _sendPipe.Writer.Write(BitConverter.GetBytes(buffer.Count + (_options.Duplex ? sizeof(int) + GUID_LEN : 0)));
+                var size = buffer.Count + (_options.Duplex ? sizeof(int) + GUID_LEN : 0);
+                BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
+                _sendPipe.Writer.Advance(sizeof(int));
 
                 if (_options.Duplex)
                 {
@@ -111,7 +107,9 @@ namespace NetX
             {
                 stream.Position = 0;
 
-                _sendPipe.Writer.Write(BitConverter.GetBytes((int)stream.Length + (_options.Duplex ? sizeof(int) + GUID_LEN : 0)));
+                var size = (int)stream.Length + (_options.Duplex ? sizeof(int) + GUID_LEN : 0);
+                BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
+                _sendPipe.Writer.Advance(sizeof(int));
 
                 if (_options.Duplex)
                 {
@@ -148,9 +146,12 @@ namespace NetX
             await _semaphore.WaitAsync(cancellationToken);
             try
             {
-                _sendPipe.Writer.Write(BitConverter.GetBytes(buffer.Count + sizeof(int) + GUID_LEN));
+                var size = buffer.Count + sizeof(int) + GUID_LEN;
+                BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
+                _sendPipe.Writer.Advance(sizeof(int));
 
-                _sendPipe.Writer.Write(messageId.ToByteArray());
+                messageId.TryWriteBytes(_sendPipe.Writer.GetSpan(GUID_LEN));
+                _sendPipe.Writer.Advance(GUID_LEN);
 
                 var memory = _sendPipe.Writer.GetMemory(buffer.Count);
                 buffer.AsMemory().CopyTo(memory);
@@ -185,9 +186,13 @@ namespace NetX
             {
                 stream.Position = 0;
 
-                _sendPipe.Writer.Write(BitConverter.GetBytes((int)stream.Length + sizeof(int) + GUID_LEN));
+                var size = (int)stream.Length + sizeof(int) + GUID_LEN;
+                BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
+                _sendPipe.Writer.Advance(sizeof(int));
 
-                _sendPipe.Writer.Write(messageId.ToByteArray());
+                messageId.TryWriteBytes(_sendPipe.Writer.GetSpan(GUID_LEN));
+                _sendPipe.Writer.Advance(GUID_LEN);
+
 
                 var memory = _sendPipe.Writer.GetMemory((int)stream.Length);
                 var bytesRead = await stream.ReadAsync(memory, cancellationToken);
@@ -240,9 +245,12 @@ namespace NetX
             await _semaphore.WaitAsync(cancellationToken);
             try
             {
-                _sendPipe.Writer.Write(BitConverter.GetBytes(buffer.Count + sizeof(int) + GUID_LEN));
+                var size = buffer.Count + sizeof(int) + GUID_LEN;
+                BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
+                _sendPipe.Writer.Advance(sizeof(int));
 
-                _sendPipe.Writer.Write(messageId.ToByteArray());
+                messageId.TryWriteBytes(_sendPipe.Writer.GetSpan(GUID_LEN));
+                _sendPipe.Writer.Advance(GUID_LEN);
 
                 var memory = _sendPipe.Writer.GetMemory(buffer.Count);
                 buffer.AsMemory().CopyTo(memory);
@@ -270,9 +278,12 @@ namespace NetX
             {
                 stream.Position = 0;
 
-                _sendPipe.Writer.Write(BitConverter.GetBytes((int)stream.Length + sizeof(int) + GUID_LEN));
+                var size = (int)stream.Length + sizeof(int) + GUID_LEN;
+                BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
+                _sendPipe.Writer.Advance(sizeof(int));
 
-                _sendPipe.Writer.Write(messageId.ToByteArray());
+                messageId.TryWriteBytes(_sendPipe.Writer.GetSpan(GUID_LEN));
+                _sendPipe.Writer.Advance(GUID_LEN);
 
                 var memory = _sendPipe.Writer.GetMemory((int)stream.Length);
                 var bytesRead = await stream.ReadAsync(memory, cancellationToken);
@@ -402,7 +413,7 @@ namespace NetX
         }
 
         private bool TryGetReceivedMessage(
-            ref ReadOnlySequence<byte> buffer, 
+            ref ReadOnlySequence<byte> buffer,
             MemoryOwner<byte> recvBuffer,
             out NetXMessage netXMessage)
         {
@@ -489,7 +500,7 @@ namespace NetX
 
         private bool TryGetSendMessage(
             ref ReadOnlySequence<byte> buffer,
-            MemoryOwner<byte> sendBuffer, 
+            MemoryOwner<byte> sendBuffer,
             out ReadOnlyMemory<byte> sendBuff)
         {
             sendBuff = default;
