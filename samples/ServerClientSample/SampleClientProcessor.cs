@@ -18,8 +18,9 @@ namespace ServerClientSample
             return ValueTask.CompletedTask;
         }
 
-        public ValueTask OnDisconnectedAsync()
+        public ValueTask OnDisconnectedAsync(DisconnectReason reason)
         {
+            Log.Information("Client disconnected. Reason: {reason}", reason);
             return ValueTask.CompletedTask;
         }
 

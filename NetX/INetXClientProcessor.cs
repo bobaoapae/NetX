@@ -8,7 +8,7 @@ namespace NetX
     {
         ValueTask OnConnectedAsync(INetXClientSession client, CancellationToken cancellationToken);
         ValueTask OnReceivedMessageAsync(INetXClientSession client, NetXMessage message, CancellationToken cancellationToken);
-        ValueTask OnDisconnectedAsync();
+        ValueTask OnDisconnectedAsync(DisconnectReason reason);
 
         int GetReceiveMessageSize(INetXClientSession client, in ReadOnlyMemory<byte> buffer);
         void ProcessReceivedBuffer(INetXClientSession client, in ReadOnlyMemory<byte> buffer);

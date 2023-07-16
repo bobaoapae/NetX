@@ -40,7 +40,7 @@ namespace NetX
             }
             finally
             {
-                await ((NetXClientOptions)_options).Processor.OnDisconnectedAsync();
+                await ((NetXClientOptions)_options).Processor.OnDisconnectedAsync(DisconnectReason);
             }
         }
 

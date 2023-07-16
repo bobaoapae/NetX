@@ -15,6 +15,9 @@ namespace NetX
 {
     public abstract class NetXConnection : INetXConnection
     {
+        public bool IsConnected => _socket?.Connected ?? false;
+        internal DisconnectReason DisconnectReason { get { return _disconnectReason; } }
+
         protected readonly Socket _socket;
         protected readonly NetXConnectionOptions _options;
 
@@ -25,17 +28,18 @@ namespace NetX
         private readonly Pipe _receivePipe;
         private readonly ConcurrentDictionary<Guid, TaskCompletionSource<ArraySegment<byte>>> _completions;
 
-        private CancellationTokenSource _cancellationTokenSource;
+        private readonly CancellationTokenSource _connCancellationTokenSource;
 
         private readonly bool _reuseSocket;
+
         private bool _isSocketDisconnectCalled;
+        private DisconnectReason _disconnectReason;
 
         private readonly SemaphoreSlim _semaphore;
 
         const int GUID_LEN = 16;
         private static readonly byte[] _emptyGuid = Guid.Empty.ToByteArray();
 
-        public bool IsConnected => _socket?.Connected ?? false;
 
         public NetXConnection(Socket socket, NetXConnectionOptions options, string name, ILogger logger, bool reuseSocket = false)
         {
@@ -48,6 +52,8 @@ namespace NetX
             _sendPipe = new Pipe();
             _receivePipe = new Pipe();
             _completions = new ConcurrentDictionary<Guid, TaskCompletionSource<ArraySegment<byte>>>();
+
+            _connCancellationTokenSource = new CancellationTokenSource();
 
             _reuseSocket = reuseSocket;
 
@@ -303,37 +309,46 @@ namespace NetX
 
         #endregion
 
-        internal async Task ProcessConnection(CancellationToken cancellationToken = default)
+        internal async Task ProcessConnection(CancellationToken listenCancellationToken = default)
         {
-            lock (_socket)
-            {
-                _isSocketDisconnectCalled = false;
-            }
+            if (_connCancellationTokenSource.IsCancellationRequested)
+                return;
 
-            _cancellationTokenSource = new CancellationTokenSource();
-            cancellationToken.Register(() => _cancellationTokenSource.Cancel());
+            listenCancellationToken.Register(() =>
+            {
+                if (_disconnectReason == DisconnectReason.NONE)
+                    _disconnectReason = DisconnectReason.SHUTDOWN;
+
+                Disconnect();
+            });
 
             using var recvBuffer = MemoryOwner<byte>.Allocate(_options.RecvBufferSize);
             using var sendBuffer = MemoryOwner<byte>.Allocate(_options.SendBufferSize);
 
-            var writing = FillPipeAsync(_cancellationTokenSource.Token);
-            var reading = ReadPipeAsync(recvBuffer, _cancellationTokenSource.Token);
-            var sending = SendPipeAsync(sendBuffer, _cancellationTokenSource.Token);
+            var writing = FillPipeAsync(_connCancellationTokenSource.Token);
+            var reading = ReadPipeAsync(recvBuffer, _connCancellationTokenSource.Token);
+            var sending = SendPipeAsync(sendBuffer, _connCancellationTokenSource.Token);
 
             await Task.WhenAll(writing, reading, sending);
+
+            if (_disconnectReason == DisconnectReason.NONE)
+                _disconnectReason = DisconnectReason.CLOSE;
         }
 
         public void Disconnect()
         {
-            if (!_cancellationTokenSource.IsCancellationRequested)
-                _cancellationTokenSource.Cancel();
-
             lock (_socket)
             {
                 if (_isSocketDisconnectCalled)
                     return;
 
                 _isSocketDisconnectCalled = true;
+
+                if (_disconnectReason == DisconnectReason.NONE)
+                    _disconnectReason = DisconnectReason.FORCE;
+                
+                _connCancellationTokenSource.Cancel();
+
                 _socket.Shutdown(SocketShutdown.Both);
                 _socket.Disconnect(_reuseSocket);
             }
@@ -426,7 +441,6 @@ namespace NetX
             }
             finally
             {
-                Disconnect();
                 await _receivePipe.Reader.CompleteAsync();
             }
         }
@@ -502,7 +516,6 @@ namespace NetX
             }
             finally
             {
-                Disconnect();
                 await _sendPipe.Reader.CompleteAsync();
             }
         }

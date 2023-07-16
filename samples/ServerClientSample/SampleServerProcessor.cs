@@ -3,6 +3,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using NetX;
+using Serilog;
 
 namespace ServerClientSample
 {
@@ -20,14 +21,16 @@ namespace ServerClientSample
             var responseMess = message.Buffer.ToArray();
             var textMessage = Encoding.UTF8.GetString(message.Buffer.Span);
             var token = cancellationToken;
-            if(responseMess[0] == 0)
-                return;
+
+            //if(responseMess[0] == 0)
+            //    return;
+
             await session.ReplyAsync(messageId, responseMess, token);
         }
 
-        public ValueTask OnSessionDisconnectAsync(Guid sessionId)
+        public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason)
         {
-            Console.WriteLine($"Session {sessionId} disconnected");
+            Log.Information("Session {sessionId} disconnected. Reason: {reason}", sessionId, reason);
             return ValueTask.CompletedTask;
         }
 

@@ -15,12 +15,11 @@ namespace ServerClientSample
     {
         private static INetXServer _server;
         private static INetXClient _client;
-        private static CancellationToken _token;
 
         public static async Task Main(string[] args)
         {
-            var cancellationTokenSource = new CancellationTokenSource();
-            _token = cancellationTokenSource.Token;
+            var serverTokenSrc = new CancellationTokenSource();
+            var clientTokenSrc = new CancellationTokenSource();
 
             Log.Logger = new LoggerConfiguration()
                 .MinimumLevel.Is(Serilog.Events.LogEventLevel.Verbose)
@@ -41,7 +40,7 @@ namespace ServerClientSample
                 .SendBufferSize(20000020)
                 .Build();
 
-            _server.Listen(cancellationTokenSource.Token);
+            _server.Listen(serverTokenSrc.Token);
 
             _client = NetXClientBuilder.Create(loggerFactory, "SampleClient")
                 .Processor<SampleClientProcessor>()
@@ -54,7 +53,7 @@ namespace ServerClientSample
                 .SendBufferSize(20000020)
                 .Build();
 
-            await _client.ConnectAsync(cancellationTokenSource.Token);
+            await _client.ConnectAsync(clientTokenSrc.Token);
 
             var responses = new bool[byte.MaxValue];
 
@@ -77,65 +76,59 @@ namespace ServerClientSample
                 });
             }
 
-            _ = Task.Run(async () =>
-            {
-                while (!cancellationTokenSource.IsCancellationRequested)
-                {
-                    if (!responses.All(x => x))
-                    {
-                        Log.Information("Waiting for responses");
-                        await Task.Delay(1000);
-                    }
-                    else
-                    {
-                        Log.Information("All responses received");
-                        break;
-                    }
-                }
-            });
-
-            var response = await _client.RequestAsync(new byte[] { 255 });
-            Log.Information("Response request: {resp}", response);
+            //_ = Task.Run(async () =>
+            //{
+            //    while (!serverTokenSrc.IsCancellationRequested)
+            //    {
+            //        if (!responses.All(x => x))
+            //        {
+            //            Log.Information("Waiting for responses");
+            //            await Task.Delay(1000);
+            //        }
+            //        else
+            //        {
+            //            Log.Information("All responses received");
+            //            break;
+            //        }
+            //    }
+            //});
 
             try
             {
                 await _client.RequestAsync(new byte[] { 0 });
             }
-            catch (Exception ex)
+            catch
             {
                 responses[0] = true;
-                Log.Error(ex, "Success timeout error");
+                Log.Information("Success timeout error");
             }
 
-            while (!cancellationTokenSource.IsCancellationRequested)
+            bool stopAll = false;
+            while (!stopAll)
             {
                 var command = Console.ReadLine();
 
+                if (command == "stop_client")
+                {
+                    Console.WriteLine("Stopping client");
+                    clientTokenSrc.Cancel();
+                }
+
+                if (command == "stop_server")
+                {
+                    Console.WriteLine("Stopping server");
+                    serverTokenSrc.Cancel();
+                }
+
                 if (command == "stop")
                 {
-                    Console.WriteLine("Stopping");
-                    cancellationTokenSource.Cancel();
+                    stopAll = true;
                 }
 
                 await Task.Yield();
             }
 
             await Task.Delay(3000);
-        }
-
-        private static async Task WorkerClient()
-        {
-            try
-            {
-                while (!_token.IsCancellationRequested)
-                {
-                    //Console.WriteLine($"Received Response: {response.Array[0]}");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex);
-            }
         }
     }
 }

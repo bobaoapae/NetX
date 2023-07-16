@@ -60,36 +60,38 @@ namespace NetX
 
             _logger?.LogInformation("{svrName}: Tcp server listening on {ip}:{port}", _serverName, _options.EndPoint.Address, _options.EndPoint.Port);
 
-            _ = Task.Factory.StartNew(() => { _ = StartAcceptAsync(cancellationToken); }, cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            _ = Task.Factory.StartNew(
+                () => StartAcceptAsync(cancellationToken), 
+                default,
+                TaskCreationOptions.LongRunning, 
+                TaskScheduler.Default);
         }
 
-        private async Task StartAcceptAsync(CancellationToken cancellationToken)
+        private async Task StartAcceptAsync(CancellationToken listenCancellationToken)
         {
             try
             {
-                while (!cancellationToken.IsCancellationRequested)
+                while (!listenCancellationToken.IsCancellationRequested)
                 {
                     try
                     {
-                        var sessionSocket = await _socket.AcceptAsync(cancellationToken);
-                        _ = Task.Factory.StartNew(() => ProcessSessionConnection(sessionSocket, cancellationToken), cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                        var sessionSocket = await _socket.AcceptAsync(listenCancellationToken);
+
+                        _ = Task.Factory.StartNew(
+                            () => ProcessSessionConnection(sessionSocket, listenCancellationToken), 
+                            default, 
+                            TaskCreationOptions.LongRunning, 
+                            TaskScheduler.Default);
                     }
-                    catch (SocketException socketException)
+                    catch (TaskCanceledException) { }
+                    catch (OperationCanceledException) { }
+                    catch (SocketException e)
                     {
-                        _logger?.LogError(socketException, "{svrName}: An exception was throw on accept new connections", _serverName);
+                        _logger?.LogError(e, "{svrName}: An exception was throw on accept new connections", _serverName);
                     }
                 }
 
-                _logger?.LogInformation("{svrName}: Shutdown", _serverName);
-
-                _socket.Shutdown(SocketShutdown.Both);
-                _socket.Disconnect(true);
-
-                foreach (var session in _sessions.Values)
-                    session.Disconnect();
-            }
-            catch (OperationCanceledException)
-            {
+                _logger?.LogInformation("Shutdown {svrName} TCP server", _serverName);
             }
             catch (Exception ex)
             {
@@ -99,73 +101,42 @@ namespace NetX
 
         private async Task ProcessSessionConnection(Socket sessionSocket, CancellationToken cancellationToken)
         {
-            var remoteAddress = ((IPEndPoint)sessionSocket.RemoteEndPoint).Address.MapToIPv4();
-            if (_options.UseProxy)
-            {
-                await using var stream = new NetworkStream(sessionSocket);
-                var proxyprotocol = new ProxyProtocol(stream, sessionSocket.RemoteEndPoint as IPEndPoint);
-                var realRemoteEndpoint = await proxyprotocol.GetRemoteEndpoint();
-                remoteAddress = realRemoteEndpoint.Address.MapToIPv4();
-            }
-
-            var session = new NetXSession(sessionSocket, remoteAddress, _options, _serverName, _logger);
             try
             {
-                if (_sessions.TryAdd(session.Id, session))
+                var remoteAddress = ((IPEndPoint)sessionSocket.RemoteEndPoint).Address.MapToIPv4();
+                if (_options.UseProxy)
                 {
-                    _ = DispatchOnSessionConnect(session, cancellationToken);
+                    await using var stream = new NetworkStream(sessionSocket);
+                    var proxyprotocol = new ProxyProtocol(stream, sessionSocket.RemoteEndPoint as IPEndPoint);
+                    var realRemoteEndpoint = await proxyprotocol.GetRemoteEndpoint();
+                    remoteAddress = realRemoteEndpoint.Address.MapToIPv4();
+                }
+
+                var session = new NetXSession(sessionSocket, remoteAddress, _options, _serverName, _logger);
+                if (!_sessions.TryAdd(session.Id, session))
+                {
+                    session.Disconnect();
+                    return;
+                }
+
+                try
+                {
+                    await _options.Processor.OnSessionConnectAsync(session, cancellationToken);
                     await session.ProcessConnection(cancellationToken);
                 }
-                else
+                catch
                 {
-                    _logger?.LogCritical("{svrName}: Fail on add Session {sessId} to sessions dictionary", _serverName, session.Id);
+                    session.Disconnect();
+                }
+                finally
+                {
+                    if (_sessions.TryRemove(session.Id, out var netXSession))
+                    {
+                        await _options.Processor.OnSessionDisconnectAsync(session.Id, session.DisconnectReason);
+                    }
                 }
             }
-            catch (Exception ex)
-            {
-                _logger?.LogError(ex, "{svrName}: An exception was throw on Session {sessId}", _serverName, session.Id);
-            }
-            finally
-            {
-                if (_sessions.TryRemove(session.Id, out var netXSession))
-                {
-                    try
-                    {
-                        netXSession.Disconnect();
-                    }
-                    catch (Exception)
-                    {
-                        //ignore
-                    }
-
-                    try
-                    {
-                        await _options.Processor.OnSessionDisconnectAsync(session.Id);
-                    }
-                    catch (Exception e)
-                    {
-                        _logger?.LogError(e, "{svrName}: An exception was throw on disconnect of Session {sessId}", _serverName, session.Id);
-                    }
-                }
-                else
-                {
-                    _logger?.LogCritical("{svrName}: Fail on remove Session {sessId} from sessions dictionary", _serverName, session.Id);
-                }
-
-                sessionSocket.Close(1);
-            }
-        }
-
-        private async Task DispatchOnSessionConnect(INetXSession session, CancellationToken cancellationToken)
-        {
-            try
-            {
-                await _options.Processor.OnSessionConnectAsync(session, cancellationToken);
-            }
-            catch (Exception e)
-            {
-                _logger?.LogError(e, "{svrName}: Fail on dispatch OnSessionConnectAsync to session {sessId}", _serverName, session.Id);
-            }
+            catch { }
         }
     }
 }

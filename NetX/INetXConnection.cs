@@ -7,6 +7,8 @@ namespace NetX
 {
     public interface INetXConnection
     {
+        bool IsConnected { get; }
+
         ValueTask SendAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken = default);
         ValueTask SendAsync(Stream stream, CancellationToken cancellationToken = default);
 
@@ -17,6 +19,5 @@ namespace NetX
         ValueTask ReplyAsync(Guid messageId, Stream stream, CancellationToken cancellationToken = default);
 
         void Disconnect();
-        bool IsConnected { get; }
     }
 }
