@@ -7,7 +7,7 @@
         <PackageProjectUrl>https://github.com/project-nevareth/NetX</PackageProjectUrl>
         <RepositoryType>git</RepositoryType>
         <PublishRepositoryUrl>true</PublishRepositoryUrl>
-        <Version>2.2.0</Version>
+        <Version>2.2.1</Version>
         <IncludeSymbols>true</IncludeSymbols>
         <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     </PropertyGroup>

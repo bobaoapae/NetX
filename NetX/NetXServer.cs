@@ -119,9 +119,10 @@ namespace NetX
                     return;
                 }
 
+                _ = DispatchOnSessionConnect(session, cancellationToken);
+
                 try
                 {
-                    await _options.Processor.OnSessionConnectAsync(session, cancellationToken);
                     await session.ProcessConnection(cancellationToken);
                 }
                 catch
@@ -137,6 +138,18 @@ namespace NetX
                 }
             }
             catch { }
+        }
+
+        private async Task DispatchOnSessionConnect(INetXSession session, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await _options.Processor.OnSessionConnectAsync(session, cancellationToken);
+            }
+            catch (Exception e)
+            {
+                _logger?.LogError(e, "{svrName}: Fail on dispatch OnSessionConnectAsync to session {sessId}", _serverName, session.Id);
+            }
         }
     }
 }
