@@ -23,7 +23,7 @@ namespace NetX
 
             _ = DispatchOnClientConnect(cancellationToken);
 
-            _logger?.LogInformation("{name}: Tcp client connected to {address}:{port}", _clientName, _options.EndPoint.Address, _options.EndPoint.Port);
+            _logger?.LogInformation("{name}: TCP Client connected to {address}:{port}", _clientName, _options.EndPoint.Address, _options.EndPoint.Port);
 
             _ = Task.Factory.StartNew(() => ProcessClientConnection(cancellationToken), cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         }
@@ -40,6 +40,9 @@ namespace NetX
             }
             finally
             {
+                _logger?.LogInformation("{name}: TCP Client disconnected. Reason({reason})", 
+                    _clientName, DisconnectReason);
+
                 await ((NetXClientOptions)_options).Processor.OnDisconnectedAsync(DisconnectReason);
             }
         }

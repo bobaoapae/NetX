@@ -55,79 +55,11 @@ namespace ServerClientSample
 
             await _client.ConnectAsync(clientTokenSrc.Token);
 
-            var responses = new bool[byte.MaxValue];
+            await _client.SendAsync(new byte[] { 0 });
+            await Task.Delay(500);
+            _client.Disconnect();
 
-            for (byte i = 1; i < byte.MaxValue; i++)
-            {
-                byte value = i;
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        var respon = await _client.RequestAsync(new byte[] { value });
-                        responses[value] = true;
-                        await Task.Delay(100);
-                        Log.Information("Received delayed response: {resp}", respon.Array);
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Error(ex, "Error");
-                    }
-                });
-            }
-
-            //_ = Task.Run(async () =>
-            //{
-            //    while (!serverTokenSrc.IsCancellationRequested)
-            //    {
-            //        if (!responses.All(x => x))
-            //        {
-            //            Log.Information("Waiting for responses");
-            //            await Task.Delay(1000);
-            //        }
-            //        else
-            //        {
-            //            Log.Information("All responses received");
-            //            break;
-            //        }
-            //    }
-            //});
-
-            try
-            {
-                await _client.RequestAsync(new byte[] { 0 });
-            }
-            catch
-            {
-                responses[0] = true;
-                Log.Information("Success timeout error");
-            }
-
-            bool stopAll = false;
-            while (!stopAll)
-            {
-                var command = Console.ReadLine();
-
-                if (command == "stop_client")
-                {
-                    Console.WriteLine("Stopping client");
-                    clientTokenSrc.Cancel();
-                }
-
-                if (command == "stop_server")
-                {
-                    Console.WriteLine("Stopping server");
-                    serverTokenSrc.Cancel();
-                }
-
-                if (command == "stop")
-                {
-                    stopAll = true;
-                }
-
-                await Task.Yield();
-            }
-
+            Console.ReadLine();
             await Task.Delay(3000);
         }
     }

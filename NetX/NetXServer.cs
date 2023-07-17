@@ -58,7 +58,7 @@ namespace NetX
         {
             _socket.Listen(_options.Backlog);
 
-            _logger?.LogInformation("{svrName}: Tcp server listening on {ip}:{port}", _serverName, _options.EndPoint.Address, _options.EndPoint.Port);
+            _logger?.LogInformation("{svrName}: TCP Server listening on {ip}:{port}", _serverName, _options.EndPoint.Address, _options.EndPoint.Port);
 
             _ = Task.Factory.StartNew(
                 () => StartAcceptAsync(cancellationToken), 
@@ -91,7 +91,7 @@ namespace NetX
                     }
                 }
 
-                _logger?.LogInformation("Shutdown {svrName} TCP server", _serverName);
+                _logger?.LogInformation("{svrName}: TCP server shutdown", _serverName);
             }
             catch (Exception ex)
             {

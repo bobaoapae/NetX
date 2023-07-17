@@ -17,15 +17,9 @@ namespace ServerClientSample
 
         public async ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
         {
-            var messageId = message.Id;
-            var responseMess = message.Buffer.ToArray();
-            var textMessage = Encoding.UTF8.GetString(message.Buffer.Span);
-            var token = cancellationToken;
-
-            //if(responseMess[0] == 0)
-            //    return;
-
-            await session.ReplyAsync(messageId, responseMess, token);
+            Log.Information("Session received message");
+            await Task.Delay(4000);
+            Log.Information("Session returned to function after delay");
         }
 
         public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason)
