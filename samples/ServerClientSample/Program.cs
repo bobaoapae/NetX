@@ -7,7 +7,6 @@ using Microsoft.Extensions.Logging;
 using NetX;
 using NetX.Options;
 using Serilog;
-using static System.Net.Mime.MediaTypeNames;
 
 namespace ServerClientSample
 {

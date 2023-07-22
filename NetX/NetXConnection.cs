@@ -480,7 +480,10 @@ namespace NetX
             var next = buffer.GetPosition(size);
             buffer = buffer.Slice(next);
 
-            netXMessage = new NetXMessage(messageId, _options.CopyBuffer ? messageBuffer.ToArray() : messageBuffer);
+            var messageMemory = MemoryOwner<byte>.Allocate(messageBuffer.Length);
+            messageBuffer.CopyTo(messageMemory.Memory);
+
+            netXMessage = new NetXMessage(messageId, messageMemory);
 
             return true;
         }

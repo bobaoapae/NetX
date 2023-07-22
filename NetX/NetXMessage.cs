@@ -1,16 +1,25 @@
 ﻿using System;
+using System.Buffers;
+using CommunityToolkit.HighPerformance.Buffers;
 
 namespace NetX
 {
-    public readonly struct NetXMessage
+    public readonly struct NetXMessage : IDisposable
     {
         public Guid Id { get; }
-        public ReadOnlyMemory<byte> Buffer { get; }
+        public ReadOnlyMemory<byte> Buffer => _memoryOwner.Memory;
 
-        public NetXMessage(Guid id, ReadOnlyMemory<byte> buffer)
+        private readonly MemoryOwner<byte> _memoryOwner;
+
+        public NetXMessage(Guid id, MemoryOwner<byte> memoryOwner)
         {
             Id = id;
-            Buffer = buffer;
+            _memoryOwner = memoryOwner;
+        }
+
+        public void Dispose()
+        {
+            _memoryOwner.Dispose();
         }
     }
 }
