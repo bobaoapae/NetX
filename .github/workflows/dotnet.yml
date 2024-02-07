@@ -17,10 +17,10 @@ jobs:
       uses: actions/setup-dotnet@v2
       with:
         dotnet-version: 7.0.x
-        source-url: https://nuget.pkg.github.com/project-nevareth/index.json
+        source-url: https://nuget.pkg.github.com/bobaoapae/index.json
       env:
         NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN }}
     - name: Build with dotnet
       run: dotnet build --configuration Release --property:PackageOutputPath=../npkg
     - name: Publish
-      run: dotnet nuget push "npkg/*.nupkg" -k ${{ secrets.GITHUB_TOKEN }} -s https://nuget.pkg.github.com/project-nevareth/index.json --skip-duplicate
+      run: dotnet nuget push "npkg/*.nupkg" -k ${{ secrets.GITHUB_TOKEN }} -s https://nuget.pkg.github.com/bobaoapae/index.json --skip-duplicate
