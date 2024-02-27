@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.Versioning;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -61,9 +62,9 @@ namespace NetX
             _logger?.LogInformation("{svrName}: TCP Server listening on {ip}:{port}", _serverName, _options.EndPoint.Address, _options.EndPoint.Port);
 
             _ = Task.Factory.StartNew(
-                () => StartAcceptAsync(cancellationToken), 
+                () => StartAcceptAsync(cancellationToken),
                 default,
-                TaskCreationOptions.LongRunning, 
+                TaskCreationOptions.LongRunning,
                 TaskScheduler.Default);
         }
 
@@ -78,13 +79,17 @@ namespace NetX
                         var sessionSocket = await _socket.AcceptAsync(listenCancellationToken);
 
                         _ = Task.Factory.StartNew(
-                            () => ProcessSessionConnection(sessionSocket, listenCancellationToken), 
-                            default, 
-                            TaskCreationOptions.LongRunning, 
+                            () => ProcessSessionConnection(sessionSocket, (IPEndPoint)sessionSocket.RemoteEndPoint, listenCancellationToken),
+                            default,
+                            TaskCreationOptions.LongRunning,
                             TaskScheduler.Default);
                     }
-                    catch (TaskCanceledException) { }
-                    catch (OperationCanceledException) { }
+                    catch (TaskCanceledException)
+                    {
+                    }
+                    catch (OperationCanceledException)
+                    {
+                    }
                     catch (SocketException e)
                     {
                         _logger?.LogError(e, "{svrName}: An exception was throw on accept new connections", _serverName);
@@ -99,11 +104,20 @@ namespace NetX
             }
         }
 
-        private async Task ProcessSessionConnection(Socket sessionSocket, CancellationToken cancellationToken)
+        /**
+         * The unique purpose of expose this method it's to allow the library to be used in a proxy environment using Socket Duplicate And Close.
+         */
+        [SupportedOSPlatform("windows")]
+        public async Task UnsafeProcessSessionConnection(Socket sessionSocket, IPEndPoint ipEndPoint, CancellationToken cancellationToken)
+        {
+            await ProcessSessionConnection(sessionSocket, ipEndPoint, cancellationToken);
+        }
+
+        private async Task ProcessSessionConnection(Socket sessionSocket, IPEndPoint ipEndPoint, CancellationToken cancellationToken)
         {
             try
             {
-                var remoteAddress = ((IPEndPoint)sessionSocket.RemoteEndPoint).Address.MapToIPv4();
+                var remoteAddress = ipEndPoint.Address.MapToIPv4();
                 if (_options.UseProxy)
                 {
                     await using var stream = new NetworkStream(sessionSocket);
@@ -137,7 +151,9 @@ namespace NetX
                     }
                 }
             }
-            catch { }
+            catch
+            {
+            }
         }
 
         private async Task DispatchOnSessionConnect(INetXSession session, CancellationToken cancellationToken)
