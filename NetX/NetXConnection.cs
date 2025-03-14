@@ -15,8 +15,12 @@ namespace NetX
 {
     public abstract class NetXConnection : INetXConnection
     {
-        public bool IsConnected => _socket?.Connected ?? false;
-        internal DisconnectReason DisconnectReason { get { return _disconnectReason; } }
+        public bool IsConnected => DisconnectReason == DisconnectReason.NONE && (_socket?.Connected ?? false);
+
+        internal DisconnectReason DisconnectReason
+        {
+            get { return _disconnectReason; }
+        }
 
         protected readonly Socket _socket;
         protected readonly NetXConnectionOptions _options;
@@ -346,7 +350,7 @@ namespace NetX
 
                 if (_disconnectReason == DisconnectReason.NONE)
                     _disconnectReason = DisconnectReason.FORCE;
-                
+
                 _connCancellationTokenSource.Cancel();
 
                 _socket.Shutdown(SocketShutdown.Both);
