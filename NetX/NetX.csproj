@@ -3,11 +3,11 @@
     <PropertyGroup>
         <TargetFramework>net7.0</TargetFramework>
         <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-        <RepositoryUrl>https://github.com/project-nevareth/NetX</RepositoryUrl>
-        <PackageProjectUrl>https://github.com/project-nevareth/NetX</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/bobaoapae/NetX</RepositoryUrl>
+        <PackageProjectUrl>https://github.com/bobaoapae/NetX</PackageProjectUrl>
         <RepositoryType>git</RepositoryType>
         <PublishRepositoryUrl>true</PublishRepositoryUrl>
-        <Version>2.2.7</Version>
+        <Version>2.2.8</Version>
         <IncludeSymbols>true</IncludeSymbols>
         <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     </PropertyGroup>

@@ -141,7 +141,7 @@ namespace NetX
             }
         }
 
-        public async Task<ArraySegment<byte>> RequestAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken = default)
+        public async Task<ArraySegment<byte>> RequestAsync(ArraySegment<byte> buffer, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
             if (!_options.Duplex)
                 throw new NotSupportedException(
@@ -178,10 +178,10 @@ namespace NetX
                 _semaphore.Release();
             }
 
-            return await WaitForRequestAsync(messageId, completion, cancellationToken);
+            return await WaitForRequestAsync(messageId, completion, timeout, cancellationToken);
         }
 
-        public async Task<ArraySegment<byte>> RequestAsync(Stream stream, CancellationToken cancellationToken = default)
+        public async Task<ArraySegment<byte>> RequestAsync(Stream stream, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
             if (!_options.Duplex)
                 throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
@@ -220,27 +220,66 @@ namespace NetX
                 _semaphore.Release();
             }
 
-            return await WaitForRequestAsync(messageId, completion, cancellationToken);
+            return await WaitForRequestAsync(messageId, completion, timeout, cancellationToken);
         }
 
-        private Task<ArraySegment<byte>> WaitForRequestAsync(Guid taskCompletionId, TaskCompletionSource<ArraySegment<byte>> source, CancellationToken cancellationToken)
+        public Task<ArraySegment<byte>> RequestAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken = default)
         {
-            var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, new CancellationTokenSource(_options.DuplexTimeout).Token);
+            return RequestAsync(buffer, TimeSpan.Zero, cancellationToken);
+        }
+
+        public Task<ArraySegment<byte>> RequestAsync(Stream stream, CancellationToken cancellationToken = default)
+        {
+            return RequestAsync(stream, TimeSpan.Zero, cancellationToken);
+        }
+
+        private Task<ArraySegment<byte>> WaitForRequestAsync(Guid taskCompletionId, TaskCompletionSource<ArraySegment<byte>> source, TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            CancellationTokenSource timeoutCancellation;
+
+            // Determine which timeout to use
+            var effectiveTimeout = timeout;
+
+            if (timeout == TimeSpan.Zero)
+            {
+                // Use the configured timeout value
+                effectiveTimeout = TimeSpan.FromMilliseconds(_options.DuplexTimeout);
+            }
+
+            if (effectiveTimeout == Timeout.InfiniteTimeSpan)
+            {
+                // No timeout, just use the provided cancellation token
+                timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            }
+            else
+            {
+                // Use the effective timeout to create a timeout token
+                timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    new CancellationTokenSource(effectiveTimeout).Token);
+            }
+
             timeoutCancellation.Token.Register(() =>
             {
                 if (source.Task.IsCompleted)
                     return;
 
-                source.SetException(new TimeoutException());
+                // Set appropriate exception based on which token triggered the cancellation
+                if (effectiveTimeout != Timeout.InfiniteTimeSpan && !cancellationToken.IsCancellationRequested)
+                    source.SetException(new TimeoutException());
+                else
+                    source.SetException(new OperationCanceledException(cancellationToken));
 
                 if (!_completions.TryRemove(taskCompletionId, out var __))
                 {
                     _logger?.LogError("{svrName}: Cannot remove task completion for MessageId = {msgId} after timeout", _appName, taskCompletionId);
                 }
 
-                if (_options.DisconnectOnTimeout)
+                // Only disconnect on timeout, not on regular cancellation
+                if (_options.DisconnectOnTimeout && effectiveTimeout != Timeout.InfiniteTimeSpan && !cancellationToken.IsCancellationRequested)
                     Disconnect();
             });
+
             return source.Task;
         }
 

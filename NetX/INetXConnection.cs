@@ -12,6 +12,8 @@ namespace NetX
         ValueTask SendAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken = default);
         ValueTask SendAsync(Stream stream, CancellationToken cancellationToken = default);
 
+        Task<ArraySegment<byte>> RequestAsync(ArraySegment<byte> buffer, TimeSpan timeout, CancellationToken cancellationToken = default);
+        Task<ArraySegment<byte>> RequestAsync(Stream stream, TimeSpan timeout, CancellationToken cancellationToken = default);
         Task<ArraySegment<byte>> RequestAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken = default);
         Task<ArraySegment<byte>> RequestAsync(Stream stream, CancellationToken cancellationToken = default);
 
