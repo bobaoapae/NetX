@@ -30,8 +30,8 @@ namespace ServerClientSample
 
             _server = NetXServerBuilder.Create(loggerFactory, "SampleServer")
                 .Processor<SampleServerProcessor>()
-                .EndPoint("0.0.0.0", 38101)
-                .Duplex(true)
+                .EndPoint("0.0.0.0", 48101)
+                .Duplex(false)
                 .CopyBuffer(true)
                 .NoDelay(true)
                 .SocketTimeout(1000)
@@ -41,10 +41,10 @@ namespace ServerClientSample
 
             _server.Listen(serverTokenSrc.Token);
 
-            _client = NetXClientBuilder.Create(loggerFactory, "SampleClient")
+            /*_client = NetXClientBuilder.Create(loggerFactory, "SampleClient")
                 .Processor<SampleClientProcessor>()
                 .EndPoint("127.0.0.1", 38101)
-                .Duplex(true)
+                .Duplex(false)
                 .CopyBuffer(true)
                 .NoDelay(true)
                 .SocketTimeout(1000)
@@ -54,11 +54,19 @@ namespace ServerClientSample
 
             await _client.ConnectAsync(clientTokenSrc.Token);
 
-            await _client.SendAsync(new byte[] { 0 });
-            await Task.Delay(500);
-            _client.Disconnect();
-
+            var bytesSend = new byte[35000];
+            for (var i = 0; i < bytesSend.Length; i++)
+            {
+                bytesSend[i] = (byte)(i % 256);
+            }
+            
+            Log.Information("Sending data length {dataLength}", bytesSend.Length);
+            
+            await _client.SendAsync(bytesSend);*/
+            await Task.Delay(5000);
+            
             Console.ReadLine();
+            //_client.Disconnect();
             await Task.Delay(3000);
         }
     }

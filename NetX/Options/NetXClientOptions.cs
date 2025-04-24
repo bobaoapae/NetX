@@ -16,7 +16,8 @@ namespace NetX.Options
             int duplexTimeout,
             bool copyBuffer,
             int socketTimeout,
-            bool disconnectOnTimeout) : base(
+            bool disconnectOnTimeout,
+            bool reuseSocket) : base(
                 endPoint, 
                 noDelay, 
                 recvBufferSize, 
@@ -25,7 +26,8 @@ namespace NetX.Options
                 duplexTimeout,
                 copyBuffer,
                 socketTimeout,
-                disconnectOnTimeout)
+                disconnectOnTimeout,
+                reuseSocket)
         {
             Processor = processor;
         }

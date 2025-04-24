@@ -7,7 +7,7 @@
         <PackageProjectUrl>https://github.com/bobaoapae/NetX</PackageProjectUrl>
         <RepositoryType>git</RepositoryType>
         <PublishRepositoryUrl>true</PublishRepositoryUrl>
-        <Version>2.2.8</Version>
+        <Version>2.2.9</Version>
         <IncludeSymbols>true</IncludeSymbols>
         <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     </PropertyGroup>

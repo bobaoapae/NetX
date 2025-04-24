@@ -29,7 +29,8 @@ namespace NetX.Options
                 duplexTimeout,
                 copyBuffer,
                 socketTimeout,
-                disconnectOnTimeout)
+                disconnectOnTimeout,
+                false)
         {
             Processor = processor;
             UseProxy = useProxy;

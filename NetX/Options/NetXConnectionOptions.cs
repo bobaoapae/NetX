@@ -12,6 +12,7 @@ namespace NetX.Options
         public int DuplexTimeout { get; }
         public bool CopyBuffer { get; }
         public int SocketTimeout { get; }
+        public bool ReuseSocket { get; }
         public bool DisconnectOnTimeout { get; }
 
         public NetXConnectionOptions(
@@ -23,7 +24,8 @@ namespace NetX.Options
             int duplexTimeout,
             bool copyBuffer,
             int socketTimeout,
-            bool disconnectOnTimeout)
+            bool disconnectOnTimeout,
+            bool reuseSocket)
         {
             EndPoint = endPoint;
             NoDelay = noDelay;
@@ -34,6 +36,7 @@ namespace NetX.Options
             CopyBuffer = copyBuffer;
             SocketTimeout = socketTimeout;
             DisconnectOnTimeout = disconnectOnTimeout;
+            ReuseSocket = reuseSocket;
         }
     }
 }

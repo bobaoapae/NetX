@@ -13,6 +13,7 @@ namespace NetX.Options
         protected bool _copyBuffer = true;
         protected int _socketTimeout = 0;
         protected bool _disconnectOnTimeout = true;
+        protected bool _reuseSocket = true;
 
         public INetXConnectionOptionsBuilder<T> EndPoint(IPEndPoint endPoint)
         {

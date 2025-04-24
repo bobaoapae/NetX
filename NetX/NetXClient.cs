@@ -12,7 +12,7 @@ namespace NetX
         private readonly string _clientName;
 
         internal NetXClient(NetXClientOptions options, ILoggerFactory loggerFactory = null, string clientName = null)
-            : base(new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp), options, clientName, loggerFactory?.CreateLogger<NetXClient>(), true)
+            : base(new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp), options, clientName, loggerFactory?.CreateLogger<NetXClient>(), options.ReuseSocket)
         {
             _clientName = clientName ?? nameof(NetXClient);
         }
@@ -40,7 +40,7 @@ namespace NetX
             }
             finally
             {
-                _logger?.LogInformation("{name}: TCP Client disconnected. Reason({reason})", 
+                _logger?.LogInformation("{name}: TCP Client disconnected. Reason({reason})",
                     _clientName, DisconnectReason);
 
                 await ((NetXClientOptions)_options).Processor.OnDisconnectedAsync(DisconnectReason);

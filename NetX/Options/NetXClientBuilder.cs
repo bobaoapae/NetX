@@ -1,5 +1,5 @@
-﻿using Microsoft.Extensions.Logging;
-using System.Net;
+﻿using System.Net;
+using Microsoft.Extensions.Logging;
 
 namespace NetX.Options
 {
@@ -27,6 +27,12 @@ namespace NetX.Options
             return this;
         }
 
+        public INetXClientOptionsBuilder ReuseSocket(bool reuseSocket)
+        {
+            _reuseSocket = reuseSocket;
+            return this;
+        }
+
         public INetXClientOptionsBuilder Processor<T>() where T : INetXClientProcessor, new()
         {
             _processor = new T();
@@ -45,7 +51,8 @@ namespace NetX.Options
                 _duplexTimeout,
                 _copyBuffer,
                 _socketTimeout,
-                _disconnectOnTimeout);
+                _disconnectOnTimeout,
+                _reuseSocket);
 
             return new NetXClient(options, _loggerFactory, _clientName);
         }
