@@ -4,6 +4,5 @@
     {
         INetXClientOptionsBuilder Processor<T>() where T : INetXClientProcessor, new();
         INetXClientOptionsBuilder Processor(INetXClientProcessor processorInstance);
-        INetXClientOptionsBuilder ReuseSocket(bool reuseSocket);
     }
 }

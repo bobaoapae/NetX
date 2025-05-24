@@ -27,12 +27,6 @@ namespace NetX.Options
             return this;
         }
 
-        public INetXClientOptionsBuilder ReuseSocket(bool reuseSocket)
-        {
-            _reuseSocket = reuseSocket;
-            return this;
-        }
-
         public INetXClientOptionsBuilder Processor<T>() where T : INetXClientProcessor, new()
         {
             _processor = new T();

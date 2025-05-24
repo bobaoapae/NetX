@@ -13,6 +13,7 @@ namespace NetX.Options
         INetXConnectionOptionsBuilder<T> SendBufferSize(int size);
         INetXConnectionOptionsBuilder<T> SocketTimeout(int timeout);
         INetXConnectionOptionsBuilder<T> DisconnectOnTimeout(bool disconnectOnTimeout);
+        INetXConnectionOptionsBuilder<T> ReuseSocket(bool reuseSocket);
         T Build();
     }
 }

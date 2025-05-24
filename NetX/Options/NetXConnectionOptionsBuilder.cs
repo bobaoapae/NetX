@@ -67,6 +67,12 @@ namespace NetX.Options
             return this;
         }
 
+        public INetXConnectionOptionsBuilder<T> ReuseSocket(bool reuseSocket)
+        {
+            _reuseSocket = reuseSocket;
+            return this;
+        }
+
         public abstract T Build();
     }
 }
