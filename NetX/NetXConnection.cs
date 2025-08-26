@@ -376,6 +376,8 @@ namespace NetX
 
             if (_disconnectReason == DisconnectReason.NONE)
                 _disconnectReason = DisconnectReason.CLOSE;
+
+            Disconnect();
         }
 
         public void Disconnect()
@@ -392,8 +394,20 @@ namespace NetX
 
                 _connCancellationTokenSource.Cancel();
 
-                _socket.Shutdown(SocketShutdown.Both);
+                try
+                {
+                    _socket.Shutdown(SocketShutdown.Both);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogDebug("{appName}: Exception during socket shutdown: {ex}", _appName, ex);
+                }
+
                 _socket.Disconnect(_reuseSocket);
+                if (!_reuseSocket)
+                {
+                    _socket.Close();
+                }
             }
         }
 
@@ -411,6 +425,8 @@ namespace NetX
                     int bytesRead = await _socket.ReceiveAsync(memory, SocketFlags.None, cancellationToken);
                     if (bytesRead == 0)
                     {
+                        _disconnectReason = DisconnectReason.REMOTE_CLOSE;
+                        Disconnect();
                         break;
                     }
 
@@ -426,8 +442,11 @@ namespace NetX
                     }
                 }
             }
-            catch (SocketException)
+            catch (SocketException ex)
             {
+                _logger?.LogError("{appName}: SocketException in FillPipeAsync: {ex}", _appName, ex);
+                _disconnectReason = DisconnectReason.ERROR;
+                Disconnect();
             }
             catch (OperationCanceledException)
             {
@@ -481,6 +500,12 @@ namespace NetX
             }
             catch (OperationCanceledException)
             {
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("{appName}: Exception in ReadPipeAsync: {ex}", _appName, ex);
+                _disconnectReason = DisconnectReason.ERROR;
+                Disconnect();
             }
             finally
             {
@@ -554,11 +579,20 @@ namespace NetX
                     _sendPipe.Reader.AdvanceTo(buffer.Start, buffer.End);
                 }
             }
-            catch (SocketException)
+            catch (SocketException ex)
             {
+                _logger?.LogError("{appName}: SocketException in SendPipeAsync: {ex}", _appName, ex);
+                _disconnectReason = DisconnectReason.ERROR;
+                Disconnect();
             }
             catch (OperationCanceledException)
             {
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("{appName}: Exception in SendPipeAsync: {ex}", _appName, ex);
+                _disconnectReason = DisconnectReason.ERROR;
+                Disconnect();
             }
             finally
             {

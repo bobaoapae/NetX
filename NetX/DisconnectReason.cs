@@ -5,6 +5,8 @@
         NONE,
         FORCE,
         CLOSE,
-        SHUTDOWN
+        SHUTDOWN,
+        ERROR,
+        REMOTE_CLOSE
     }
 }
