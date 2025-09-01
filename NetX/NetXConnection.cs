@@ -426,7 +426,6 @@ namespace NetX
                     if (bytesRead == 0)
                     {
                         _disconnectReason = DisconnectReason.REMOTE_CLOSE;
-                        Disconnect();
                         break;
                     }
 
@@ -446,7 +445,7 @@ namespace NetX
             {
                 _logger?.LogError("{appName}: SocketException in FillPipeAsync: {ex}", _appName, ex);
                 _disconnectReason = DisconnectReason.ERROR;
-                Disconnect();
+                _connCancellationTokenSource.Cancel();
             }
             catch (OperationCanceledException)
             {
@@ -454,7 +453,6 @@ namespace NetX
             finally
             {
                 await _receivePipe.Writer.CompleteAsync();
-                _sendPipe.Reader.CancelPendingRead();
             }
         }
 
@@ -505,11 +503,12 @@ namespace NetX
             {
                 _logger?.LogError("{appName}: Exception in ReadPipeAsync: {ex}", _appName, ex);
                 _disconnectReason = DisconnectReason.ERROR;
-                Disconnect();
+                _connCancellationTokenSource.Cancel();
             }
             finally
             {
                 await _receivePipe.Reader.CompleteAsync();
+                await _sendPipe.Writer.CompleteAsync();
             }
         }
 
@@ -583,7 +582,7 @@ namespace NetX
             {
                 _logger?.LogError("{appName}: SocketException in SendPipeAsync: {ex}", _appName, ex);
                 _disconnectReason = DisconnectReason.ERROR;
-                Disconnect();
+                _connCancellationTokenSource.Cancel();
             }
             catch (OperationCanceledException)
             {
@@ -592,7 +591,7 @@ namespace NetX
             {
                 _logger?.LogError("{appName}: Exception in SendPipeAsync: {ex}", _appName, ex);
                 _disconnectReason = DisconnectReason.ERROR;
-                Disconnect();
+                _connCancellationTokenSource.Cancel();
             }
             finally
             {
