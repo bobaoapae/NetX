@@ -31,6 +31,7 @@ namespace NetX
         private readonly Pipe _sendPipe;
         private readonly Pipe _receivePipe;
         private readonly ConcurrentDictionary<Guid, TaskCompletionSource<ArraySegment<byte>>> _completions;
+        private readonly ConcurrentDictionary<Guid, byte> _timedOutCompletions;
 
         private readonly CancellationTokenSource _connCancellationTokenSource;
 
@@ -56,6 +57,7 @@ namespace NetX
             _sendPipe = new Pipe();
             _receivePipe = new Pipe();
             _completions = new ConcurrentDictionary<Guid, TaskCompletionSource<ArraySegment<byte>>>();
+            _timedOutCompletions = new ConcurrentDictionary<Guid, byte>();
 
             _connCancellationTokenSource = new CancellationTokenSource();
 
@@ -100,7 +102,8 @@ namespace NetX
 
                 _sendPipe.Writer.Advance(buffer.Count);
 
-                await _sendPipe.Writer.FlushAsync(cancellationToken);
+                if (!_connCancellationTokenSource.IsCancellationRequested)
+                    await _sendPipe.Writer.FlushAsync(_connCancellationTokenSource.Token);
             }
             finally
             {
@@ -117,22 +120,46 @@ namespace NetX
             try
             {
                 stream.Position = 0;
+                var streamLength = (int)stream.Length;
 
-                var size = (int)stream.Length + (_options.Duplex ? sizeof(int) + GUID_LEN : 0);
-                BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
-                _sendPipe.Writer.Advance(sizeof(int));
-
-                if (_options.Duplex)
+                // Read stream into temporary buffer BEFORE writing to the pipe.
+                // If the read fails (IOException, etc.), the pipe is untouched — no corruption.
+                var rentedBuffer = ArrayPool<byte>.Shared.Rent(streamLength);
+                int bytesRead;
+                try
                 {
-                    _sendPipe.Writer.Write(_emptyGuid);
+                    bytesRead = await stream.ReadAsync(rentedBuffer.AsMemory(0, streamLength), cancellationToken);
+                }
+                catch
+                {
+                    ArrayPool<byte>.Shared.Return(rentedBuffer);
+                    throw;
                 }
 
-                var memory = _sendPipe.Writer.GetMemory((int)stream.Length);
-                var bytesRead = await stream.ReadAsync(memory, cancellationToken);
-                if (bytesRead != 0)
+                try
                 {
-                    _sendPipe.Writer.Advance(bytesRead);
-                    _ = await _sendPipe.Writer.FlushAsync(cancellationToken);
+                    if (bytesRead != 0)
+                    {
+                        var size = bytesRead + (_options.Duplex ? sizeof(int) + GUID_LEN : 0);
+                        BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
+                        _sendPipe.Writer.Advance(sizeof(int));
+
+                        if (_options.Duplex)
+                        {
+                            _sendPipe.Writer.Write(_emptyGuid);
+                        }
+
+                        var memory = _sendPipe.Writer.GetMemory(bytesRead);
+                        rentedBuffer.AsMemory(0, bytesRead).CopyTo(memory);
+                        _sendPipe.Writer.Advance(bytesRead);
+
+                        if (!_connCancellationTokenSource.IsCancellationRequested)
+                            await _sendPipe.Writer.FlushAsync(_connCancellationTokenSource.Token);
+                    }
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(rentedBuffer);
                 }
             }
             finally
@@ -171,7 +198,8 @@ namespace NetX
 
                 _sendPipe.Writer.Advance(buffer.Count);
 
-                await _sendPipe.Writer.FlushAsync(cancellationToken);
+                if (!_connCancellationTokenSource.IsCancellationRequested)
+                    await _sendPipe.Writer.FlushAsync(_connCancellationTokenSource.Token);
             }
             finally
             {
@@ -198,21 +226,43 @@ namespace NetX
             try
             {
                 stream.Position = 0;
+                var streamLength = (int)stream.Length;
 
-                var size = (int)stream.Length + sizeof(int) + GUID_LEN;
-                BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
-                _sendPipe.Writer.Advance(sizeof(int));
-
-                messageId.TryWriteBytes(_sendPipe.Writer.GetSpan(GUID_LEN));
-                _sendPipe.Writer.Advance(GUID_LEN);
-
-
-                var memory = _sendPipe.Writer.GetMemory((int)stream.Length);
-                var bytesRead = await stream.ReadAsync(memory, cancellationToken);
-                if (bytesRead != 0)
+                // Read stream into temporary buffer BEFORE writing to the pipe.
+                var rentedBuffer = ArrayPool<byte>.Shared.Rent(streamLength);
+                int bytesRead;
+                try
                 {
-                    _sendPipe.Writer.Advance(bytesRead);
-                    await _sendPipe.Writer.FlushAsync(cancellationToken);
+                    bytesRead = await stream.ReadAsync(rentedBuffer.AsMemory(0, streamLength), cancellationToken);
+                }
+                catch
+                {
+                    ArrayPool<byte>.Shared.Return(rentedBuffer);
+                    throw;
+                }
+
+                try
+                {
+                    if (bytesRead != 0)
+                    {
+                        var size = bytesRead + sizeof(int) + GUID_LEN;
+                        BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
+                        _sendPipe.Writer.Advance(sizeof(int));
+
+                        messageId.TryWriteBytes(_sendPipe.Writer.GetSpan(GUID_LEN));
+                        _sendPipe.Writer.Advance(GUID_LEN);
+
+                        var memory = _sendPipe.Writer.GetMemory(bytesRead);
+                        rentedBuffer.AsMemory(0, bytesRead).CopyTo(memory);
+                        _sendPipe.Writer.Advance(bytesRead);
+
+                        if (!_connCancellationTokenSource.IsCancellationRequested)
+                            await _sendPipe.Writer.FlushAsync(_connCancellationTokenSource.Token);
+                    }
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(rentedBuffer);
                 }
             }
             finally
@@ -235,28 +285,27 @@ namespace NetX
 
         private Task<ArraySegment<byte>> WaitForRequestAsync(Guid taskCompletionId, TaskCompletionSource<ArraySegment<byte>> source, TimeSpan timeout, CancellationToken cancellationToken)
         {
-            CancellationTokenSource timeoutCancellation;
-
             // Determine which timeout to use
             var effectiveTimeout = timeout;
 
             if (timeout == TimeSpan.Zero)
             {
-                // Use the configured timeout value
                 effectiveTimeout = TimeSpan.FromMilliseconds(_options.DuplexTimeout);
             }
 
+            CancellationTokenSource innerTimeoutCts = null;
+            CancellationTokenSource timeoutCancellation;
+
             if (effectiveTimeout == Timeout.InfiniteTimeSpan)
             {
-                // No timeout, just use the provided cancellation token
-                timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken, _connCancellationTokenSource.Token);
             }
             else
             {
-                // Use the effective timeout to create a timeout token
+                innerTimeoutCts = new CancellationTokenSource(effectiveTimeout);
                 timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken,
-                    new CancellationTokenSource(effectiveTimeout).Token);
+                    cancellationToken, innerTimeoutCts.Token, _connCancellationTokenSource.Token);
             }
 
             timeoutCancellation.Token.Register(() =>
@@ -265,20 +314,35 @@ namespace NetX
                     return;
 
                 // Set appropriate exception based on which token triggered the cancellation
-                if (effectiveTimeout != Timeout.InfiniteTimeSpan && !cancellationToken.IsCancellationRequested)
-                    source.SetException(new TimeoutException());
+                if (effectiveTimeout != Timeout.InfiniteTimeSpan
+                    && !cancellationToken.IsCancellationRequested
+                    && !_connCancellationTokenSource.IsCancellationRequested)
+                    source.TrySetException(new TimeoutException());
                 else
-                    source.SetException(new OperationCanceledException(cancellationToken));
+                    source.TrySetException(new OperationCanceledException(cancellationToken));
 
-                if (!_completions.TryRemove(taskCompletionId, out var __))
+                if (_completions.TryRemove(taskCompletionId, out var __))
+                {
+                    _timedOutCompletions.TryAdd(taskCompletionId, 0);
+                }
+                else
                 {
                     _logger?.LogError("{svrName}: Cannot remove task completion for MessageId = {msgId} after timeout", _appName, taskCompletionId);
                 }
 
-                // Only disconnect on timeout, not on regular cancellation
-                if (_options.DisconnectOnTimeout && effectiveTimeout != Timeout.InfiniteTimeSpan && !cancellationToken.IsCancellationRequested)
+                // Only disconnect on actual timeout, not on regular cancellation or connection close
+                if (_options.DisconnectOnTimeout && effectiveTimeout != Timeout.InfiniteTimeSpan
+                    && !cancellationToken.IsCancellationRequested
+                    && !_connCancellationTokenSource.IsCancellationRequested)
                     Disconnect();
             });
+
+            // Dispose CTS objects when the task completes (success, timeout, or cancellation)
+            source.Task.ContinueWith(_ =>
+            {
+                timeoutCancellation.Dispose();
+                innerTimeoutCts?.Dispose();
+            }, TaskScheduler.Default);
 
             return source.Task;
         }
@@ -307,7 +371,8 @@ namespace NetX
 
                 _sendPipe.Writer.Advance(buffer.Count);
 
-                await _sendPipe.Writer.FlushAsync(cancellationToken);
+                if (!_connCancellationTokenSource.IsCancellationRequested)
+                    await _sendPipe.Writer.FlushAsync(_connCancellationTokenSource.Token);
             }
             finally
             {
@@ -328,20 +393,43 @@ namespace NetX
             try
             {
                 stream.Position = 0;
+                var streamLength = (int)stream.Length;
 
-                var size = (int)stream.Length + sizeof(int) + GUID_LEN;
-                BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
-                _sendPipe.Writer.Advance(sizeof(int));
-
-                messageId.TryWriteBytes(_sendPipe.Writer.GetSpan(GUID_LEN));
-                _sendPipe.Writer.Advance(GUID_LEN);
-
-                var memory = _sendPipe.Writer.GetMemory((int)stream.Length);
-                var bytesRead = await stream.ReadAsync(memory, cancellationToken);
-                if (bytesRead != 0)
+                // Read stream into temporary buffer BEFORE writing to the pipe.
+                var rentedBuffer = ArrayPool<byte>.Shared.Rent(streamLength);
+                int bytesRead;
+                try
                 {
-                    _sendPipe.Writer.Advance(bytesRead);
-                    await _sendPipe.Writer.FlushAsync(cancellationToken);
+                    bytesRead = await stream.ReadAsync(rentedBuffer.AsMemory(0, streamLength), cancellationToken);
+                }
+                catch
+                {
+                    ArrayPool<byte>.Shared.Return(rentedBuffer);
+                    throw;
+                }
+
+                try
+                {
+                    if (bytesRead != 0)
+                    {
+                        var size = bytesRead + sizeof(int) + GUID_LEN;
+                        BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
+                        _sendPipe.Writer.Advance(sizeof(int));
+
+                        messageId.TryWriteBytes(_sendPipe.Writer.GetSpan(GUID_LEN));
+                        _sendPipe.Writer.Advance(GUID_LEN);
+
+                        var memory = _sendPipe.Writer.GetMemory(bytesRead);
+                        rentedBuffer.AsMemory(0, bytesRead).CopyTo(memory);
+                        _sendPipe.Writer.Advance(bytesRead);
+
+                        if (!_connCancellationTokenSource.IsCancellationRequested)
+                            await _sendPipe.Writer.FlushAsync(_connCancellationTokenSource.Token);
+                    }
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(rentedBuffer);
                 }
             }
             finally
@@ -357,7 +445,7 @@ namespace NetX
             if (_connCancellationTokenSource.IsCancellationRequested)
                 return;
 
-            listenCancellationToken.Register(() =>
+            var listenRegistration = listenCancellationToken.Register(() =>
             {
                 if (_disconnectReason == DisconnectReason.NONE)
                     _disconnectReason = DisconnectReason.SHUTDOWN;
@@ -365,19 +453,49 @@ namespace NetX
                 Disconnect();
             });
 
-            using var recvBuffer = MemoryOwner<byte>.Allocate(_options.RecvBufferSize);
-            using var sendBuffer = MemoryOwner<byte>.Allocate(_options.SendBufferSize);
+            try
+            {
+                using var recvBuffer = MemoryOwner<byte>.Allocate(_options.RecvBufferSize);
+                using var sendBuffer = MemoryOwner<byte>.Allocate(_options.SendBufferSize);
 
-            var writing = FillPipeAsync(_connCancellationTokenSource.Token);
-            var reading = ReadPipeAsync(recvBuffer, _connCancellationTokenSource.Token);
-            var sending = SendPipeAsync(sendBuffer, _connCancellationTokenSource.Token);
+                var writing = FillPipeAsync(_connCancellationTokenSource.Token);
+                var reading = ReadPipeAsync(recvBuffer, _connCancellationTokenSource.Token);
+                var sending = SendPipeAsync(sendBuffer, _connCancellationTokenSource.Token);
 
-            await Task.WhenAll(writing, reading, sending);
+                // Wait for receive-side loops to complete first
+                await Task.WhenAll(writing, reading);
 
-            if (_disconnectReason == DisconnectReason.NONE)
-                _disconnectReason = DisconnectReason.CLOSE;
+                // Ensure connection cancellation is triggered so SendPipeAsync can exit
+                // (e.g., after REMOTE_CLOSE where FillPipeAsync doesn't cancel)
+                if (!_connCancellationTokenSource.IsCancellationRequested)
+                    _connCancellationTokenSource.Cancel();
 
-            Disconnect();
+                await sending;
+
+                // Cancel all pending request completions — fail-fast on disconnect
+                foreach (var kvp in _completions)
+                {
+                    if (_completions.TryRemove(kvp.Key, out var tcs))
+                        tcs.TrySetException(new OperationCanceledException("Connection closed"));
+                }
+
+                if (_disconnectReason == DisconnectReason.NONE)
+                    _disconnectReason = DisconnectReason.CLOSE;
+
+                Disconnect();
+            }
+            finally
+            {
+                // Dispose registration to release reference from server's CTS to this connection.
+                // Without this, every session that ever connected keeps a callback registered
+                // on the server's CancellationToken, leaking session objects until server shutdown.
+                listenRegistration.Dispose();
+                // Free timed-out completions tracking memory
+                _timedOutCompletions.Clear();
+                // Note: _connCancellationTokenSource and _semaphore are NOT disposed here
+                // because fire-and-forget handlers may still reference them after ProcessConnection exits.
+                // They are lightweight and GC-safe.
+            }
         }
 
         public void Disconnect()
@@ -403,10 +521,25 @@ namespace NetX
                     _logger?.LogDebug("{appName}: Exception during socket shutdown: {ex}", _appName, ex);
                 }
 
-                _socket.Disconnect(_reuseSocket);
+                try
+                {
+                    _socket.Disconnect(_reuseSocket);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogDebug("{appName}: Exception during socket disconnect: {ex}", _appName, ex);
+                }
+
                 if (!_reuseSocket)
                 {
-                    _socket.Close();
+                    try
+                    {
+                        _socket.Close();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogDebug("{appName}: Exception during socket close: {ex}", _appName, ex);
+                    }
                 }
             }
         }
@@ -469,22 +602,42 @@ namespace NetX
                     {
                         if (_options.Duplex && message.Id != Guid.Empty && _completions.TryRemove(message.Id, out var completion))
                         {
-                            //If set result fails, it means that the message was received but the completion source was canceled or timed out. So we just log and ignore it.
                             if (!MemoryMarshal.TryGetArray(message.Buffer, out var arraySegment))
                             {
                                 _logger?.LogError("{appName}: Failed to get array segment from duplex message. MessageId = {msgId}", _appName, message.Id);
+                                message.Dispose();
                                 continue;
                             }
 
                             if (!completion.TrySetResult(arraySegment))
                             {
                                 _logger?.LogError("{appName}: Failed to set duplex completion result. MessageId = {msgId}", _appName, message.Id);
+                                message.Dispose();
                             }
 
                             continue;
                         }
 
-                        await OnReceivedMessageAsync(message, cancellationToken);
+                        // Bug 7: Stale duplex reply — completion was already consumed by timeout.
+                        // Discard silently instead of dispatching to handler as regular message.
+                        if (_options.Duplex && message.Id != Guid.Empty
+                            && _timedOutCompletions.TryRemove(message.Id, out _))
+                        {
+                            message.Dispose();
+                            continue;
+                        }
+
+                        // Bug 6: Isolate handler exceptions per-message.
+                        // A single handler failure should not kill the entire IPC connection.
+                        try
+                        {
+                            await OnReceivedMessageAsync(message, cancellationToken);
+                        }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex)
+                        {
+                            _logger?.LogError("{appName}: Exception in message handler: {ex}", _appName, ex);
+                        }
 
                         if (result.IsCanceled || result.IsCompleted)
                             break;
@@ -508,7 +661,6 @@ namespace NetX
             finally
             {
                 await _receivePipe.Reader.CompleteAsync();
-                await _sendPipe.Writer.CompleteAsync();
             }
         }
 
@@ -531,6 +683,16 @@ namespace NetX
 
             var size = _options.Duplex ? BitConverter.ToInt32(recvBuffer.Span) : GetReceiveMessageSize(recvBuffer.Memory[..(int)minRecvSize]);
             var messageId = _options.Duplex ? new Guid(recvBuffer.Span.Slice(4, 16)) : Guid.Empty;
+
+            if (size <= 0 || (_options.Duplex && size < headerOffset))
+            {
+                _logger?.LogError(
+                    "{appName}: Invalid frame size {size}, expected >= {headerOffset}. Disconnecting.",
+                    _appName, size, headerOffset);
+                _disconnectReason = DisconnectReason.CLOSE;
+                _connCancellationTokenSource.Cancel();
+                return false;
+            }
 
             if (size > _options.RecvBufferSize)
                 throw new Exception(
@@ -571,7 +733,16 @@ namespace NetX
                     {
                         if (_socket.Connected)
                         {
-                            await _socket.SendAsync(sendBuff, SocketFlags.None, cancellationToken);
+                            try
+                            {
+                                using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                                sendCts.CancelAfter(_options.SocketTimeout > 0 ? _options.SocketTimeout : 3000);
+                                await _socket.SendAsync(sendBuff, SocketFlags.None, sendCts.Token);
+                            }
+                            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                            {
+                                throw new SocketException((int)SocketError.TimedOut);
+                            }
                         }
                     }
 
