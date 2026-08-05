@@ -452,3 +452,6 @@ $RECYCLE.BIN/
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
+
+# Rebuildable local native probe artifact; never commit the binary.
+/TcpProtocols.dll
