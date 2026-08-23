@@ -13,8 +13,6 @@ namespace ServerClientSample
     public class Program
     {
         private static INetXServer _server;
-        private static INetXClient _client;
-
         public static async Task Main(string[] args)
         {
             var serverTokenSrc = new CancellationTokenSource();
