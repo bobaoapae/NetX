@@ -1,16 +1,19 @@
-﻿using System.Net;
+using System.Net;
 
 namespace NetX.Options
 {
     public abstract class NetXConnectionOptionsBuilder<T> : INetXConnectionOptionsBuilder<T>
     {
+        // 16 MiB default — decoupled from RecvBufferSize/SendBufferSize (those size the socket-level
+        // scratch buffers; this bounds how large a single logical frame is allowed to accumulate to).
+        internal const int DefaultMaxFrameBytes = 16 * 1024 * 1024;
+
         protected IPEndPoint _endpoint;
         protected bool _noDelay = false;
         protected int _recvBufferSize = 1024;
         protected int _sendBufferSize = 1024;
-        protected bool _duplex = false;
         protected int _duplexTimeout = 5000;
-        protected bool _copyBuffer = true;
+        protected int _maxFrameBytes = DefaultMaxFrameBytes;
         protected int _socketTimeout = 0;
         protected bool _disconnectOnTimeout = true;
         protected bool _reuseSocket = true;
@@ -30,16 +33,9 @@ namespace NetX.Options
             return this;
         }
 
-        public INetXConnectionOptionsBuilder<T> Duplex(bool duplex, int timeout = 5000)
+        public INetXConnectionOptionsBuilder<T> DuplexTimeout(int timeoutMs)
         {
-            _duplex = duplex;
-            _duplexTimeout = timeout;
-            return this;
-        }
-
-        public INetXConnectionOptionsBuilder<T> CopyBuffer(bool copyBuffer)
-        {
-            _copyBuffer = copyBuffer;
+            _duplexTimeout = timeoutMs;
             return this;
         }
 
@@ -52,6 +48,12 @@ namespace NetX.Options
         public INetXConnectionOptionsBuilder<T> SendBufferSize(int size)
         {
             _sendBufferSize = size;
+            return this;
+        }
+
+        public INetXConnectionOptionsBuilder<T> MaxFrameBytes(int size)
+        {
+            _maxFrameBytes = size;
             return this;
         }
 

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using NetX;
@@ -8,12 +8,7 @@ namespace ServerClientSample
 {
     public class SampleClientProcessor : INetXClientProcessor
     {
-        public int GetReceiveMessageSize(INetXClientSession client, in ReadOnlyMemory<byte> buffer)
-        {
-            return default;
-        }
-
-        public ValueTask OnConnectedAsync(INetXClientSession client, CancellationToken cancellationToken)
+        public ValueTask OnConnectedAsync(INetXConnection client, CancellationToken cancellationToken)
         {
             return ValueTask.CompletedTask;
         }
@@ -24,16 +19,22 @@ namespace ServerClientSample
             return ValueTask.CompletedTask;
         }
 
-        public ValueTask OnReceivedMessageAsync(INetXClientSession client, NetXMessage message, CancellationToken cancellationToken)
+        public ValueTask OnReceivedMessageAsync(INetXConnection client, NetXMessage message, CancellationToken cancellationToken)
         {
-            return ValueTask.CompletedTask;
+            // Ownership contract: this handler owns `message` and must dispose it once done
+            // reading its Buffer. We finish synchronously here, so a `using` is enough — a handler
+            // that offloads work to a background task must dispose there instead (see NetXMessage).
+            using (message)
+            {
+                return ValueTask.CompletedTask;
+            }
         }
 
-        public void ProcessReceivedBuffer(INetXClientSession client, in ReadOnlyMemory<byte> buffer)
+        public void ProcessReceivedBuffer(INetXConnection client, in ReadOnlyMemory<byte> buffer)
         {
         }
 
-        public void ProcessSendBuffer(INetXClientSession client, in ReadOnlyMemory<byte> buffer)
+        public void ProcessSendBuffer(INetXConnection client, in ReadOnlyMemory<byte> buffer)
         {
         }
     }

@@ -12,15 +12,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Setup .NET
-      uses: actions/setup-dotnet@v2
+      uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 10.0.x
         source-url: https://nuget.pkg.github.com/bobaoapae/index.json
       env:
         NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN }}
-    - name: Build with dotnet
-      run: dotnet build --configuration Release --property:PackageOutputPath=../npkg
+    - name: Restore
+      run: dotnet restore NetX.sln
+    - name: Build
+      run: dotnet build NetX.sln --configuration Release --no-restore --warnaserror
+    - name: Test
+      run: dotnet test NetX.sln --configuration Release --no-build --no-restore
+    - name: Pack
+      if: github.event_name == 'push'
+      run: |
+        dotnet pack NetX/NetX.csproj --configuration Release --no-build --no-restore --output npkg
+        dotnet pack NetX.AutoService/NetX.AutoService.csproj --configuration Release --no-build --no-restore --output npkg
     - name: Publish
+      if: github.event_name == 'push'
       run: dotnet nuget push "npkg/*.nupkg" -k ${{ secrets.GITHUB_TOKEN }} -s https://nuget.pkg.github.com/bobaoapae/index.json --skip-duplicate

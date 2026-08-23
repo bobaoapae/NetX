@@ -1,6 +1,9 @@
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
+using CommunityToolkit.HighPerformance.Buffers;
 using NetX;
 using NetX.Options;
 using Xunit;
@@ -51,7 +54,7 @@ public class NetXConnectionBugTests
         var dbServer = NetXServerBuilder.Create(null, "DatabaseServer")
             .Processor(dbProcessor)
             .EndPoint("127.0.0.1", (ushort)port)
-            .Duplex(true, timeout: 30000)
+            .DuplexTimeout(30000)
             .NoDelay(true)
             .ReceiveBufferSize(65536)
             .SendBufferSize(65536)
@@ -68,7 +71,7 @@ public class NetXConnectionBugTests
             var gameClient = NetXClientBuilder.Create(null, "GameServer")
                 .Processor(gameProcessor)
                 .EndPoint("127.0.0.1", (ushort)port)
-                .Duplex(true, timeout: 30000)
+                .DuplexTimeout(30000)
                 .NoDelay(true)
                 .ReceiveBufferSize(65536)
                 .SendBufferSize(65536)
@@ -79,7 +82,7 @@ public class NetXConnectionBugTests
 
             // GameServer envia query "GetPlayerData" — não espera resposta,
             // pois vai desconectar antes dela chegar
-            var queryPayload = new ArraySegment<byte>(new byte[] { 0x01, 0x02, 0x03, 0x04 });
+            var queryPayload = new byte[] { 0x01, 0x02, 0x03, 0x04 };
             _ = gameClient.RequestAsync(queryPayload, TimeSpan.FromSeconds(30));
 
             // Espera o DatabaseServer receber a query e despachar para a pipeline SQL
@@ -117,27 +120,32 @@ public class NetXConnectionBugTests
 
         public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
         {
-            if (message.Id != Guid.Empty)
+            // Handler owns `message`; only the correlation id (a value copy) survives past this
+            // synchronous call, so it's safe to dispose before the background pipeline runs.
+            using (message)
             {
-                var queryId = message.Id;
-                QueryReceived.TrySetResult();
+                if (message.CorrelationId != 0)
+                {
+                    var queryId = message.CorrelationId;
+                    QueryReceived.TrySetResult();
 
-                // Pipeline SQL em background — padrão real em servidores de jogo:
-                // o handler retorna imediatamente para não bloquear o receive loop,
-                // e o trabalho pesado roda em background.
-                _ = ExecuteSqlAndReplyAsync(session, queryId);
+                    // Pipeline SQL em background — padrão real em servidores de jogo:
+                    // o handler retorna imediatamente para não bloquear o receive loop,
+                    // e o trabalho pesado roda em background.
+                    _ = ExecuteSqlAndReplyAsync(session, queryId);
+                }
+
+                return ValueTask.CompletedTask;
             }
-
-            return ValueTask.CompletedTask;
         }
 
-        private async Task ExecuteSqlAndReplyAsync(INetXSession session, Guid queryId)
+        private async Task ExecuteSqlAndReplyAsync(INetXSession session, ulong queryId)
         {
             // Simula tempo de execução SQL (SELECT * FROM players WHERE ...)
             await Task.Delay(2000);
 
             // Resultado da query
-            var resultPayload = new ArraySegment<byte>(new byte[] { 0xAA, 0xBB });
+            var resultPayload = new byte[] { 0xAA, 0xBB };
             try
             {
                 await session.ReplyAsync(queryId, resultPayload);
@@ -151,7 +159,6 @@ public class NetXConnectionBugTests
 
         public ValueTask OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken) => ValueTask.CompletedTask;
         public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason) => ValueTask.CompletedTask;
-        public int GetReceiveMessageSize(INetXSession session, in ReadOnlyMemory<byte> buffer) => 0;
         public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
         public void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
     }
@@ -186,7 +193,7 @@ public class NetXConnectionBugTests
         var masterServer = NetXServerBuilder.Create(null, "MasterServer")
             .Processor(masterProcessor)
             .EndPoint("127.0.0.1", (ushort)port)
-            .Duplex(true, timeout: 5000)
+            .DuplexTimeout(5000)
             .NoDelay(true)
             .ReceiveBufferSize(65536)
             .SendBufferSize(65536)
@@ -208,13 +215,13 @@ public class NetXConnectionBugTests
             await masterProcessor.SessionConnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
             // Client bugado envia frame com size = payload.Length (4 bytes)
-            // ao invés de size = payload.Length + sizeof(int) + GUID_LEN (24 bytes).
-            // Wire format: [size=4][guid 16 bytes][payload 4 bytes] = 24 bytes total
+            // ao invés de size = payload.Length + sizeof(int) + sizeof(ulong) (16 bytes).
+            // Wire format: [i32 totalLength][u64 correlationId 8 bytes][payload 4 bytes] = 16 bytes total
             var payload = new byte[] { 0x01, 0x02, 0x03, 0x04 };
-            var frame = new byte[4 + 16 + payload.Length]; // 24 bytes
-            BitConverter.TryWriteBytes(frame.AsSpan(0, 4), payload.Length); // BUG: size=4, deveria ser 24
-            Guid.NewGuid().TryWriteBytes(frame.AsSpan(4, 16));
-            payload.CopyTo(frame.AsSpan(20));
+            var frame = new byte[4 + 8 + payload.Length]; // 16 bytes
+            BitConverter.TryWriteBytes(frame.AsSpan(0, 4), payload.Length); // BUG: size=4, deveria ser 16
+            BitConverter.TryWriteBytes(frame.AsSpan(4, 8), 42UL);
+            payload.CopyTo(frame.AsSpan(12));
 
             await buggyClient.SendAsync(frame, SocketFlags.None);
 
@@ -252,9 +259,11 @@ public class NetXConnectionBugTests
         }
 
         public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
-            => ValueTask.CompletedTask;
+        {
+            message.Dispose();
+            return ValueTask.CompletedTask;
+        }
 
-        public int GetReceiveMessageSize(INetXSession session, in ReadOnlyMemory<byte> buffer) => 0;
         public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
         public void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
     }
@@ -289,7 +298,7 @@ public class NetXConnectionBugTests
         var dbServer = NetXServerBuilder.Create(null, "DatabaseServer")
             .Processor(dbProcessor)
             .EndPoint("127.0.0.1", (ushort)port)
-            .Duplex(true, timeout: 5000)
+            .DuplexTimeout(5000)
             .NoDelay(true)
             .ReceiveBufferSize(65536)
             .SendBufferSize(65536)
@@ -306,7 +315,7 @@ public class NetXConnectionBugTests
             var gameClient = NetXClientBuilder.Create(null, "GameServer")
                 .Processor(gameProcessor)
                 .EndPoint("127.0.0.1", (ushort)port)
-                .Duplex(true, timeout: 30000)
+                .DuplexTimeout(30000)
                 .NoDelay(true)
                 .ReceiveBufferSize(65536)
                 .SendBufferSize(65536)
@@ -316,9 +325,11 @@ public class NetXConnectionBugTests
             await Task.Delay(200);
 
             // Simula tráfego de warm-up para estabilizar alocações internas
-            var playerAction = new ArraySegment<byte>(new byte[] { 0x10, 0x20, 0x30 });
+            var playerAction = new byte[] { 0x10, 0x20, 0x30 };
             for (int i = 0; i < 50; i++)
-                await gameClient.RequestAsync(playerAction, TimeSpan.FromSeconds(30));
+            {
+                using var warmupReply = await gameClient.RequestAsync(playerAction, TimeSpan.FromSeconds(30));
+            }
 
             // Baseline de memória após warm-up
             ForceFullGC();
@@ -329,7 +340,9 @@ public class NetXConnectionBugTests
             // O DatabaseServer responde em <1ms — todos os requests completam rápido.
             const int peakRequestCount = 2000;
             for (int i = 0; i < peakRequestCount; i++)
-                await gameClient.RequestAsync(playerAction, TimeSpan.FromSeconds(30));
+            {
+                using var reply = await gameClient.RequestAsync(playerAction, TimeSpan.FromSeconds(30));
+            }
 
             // Pico acabou. Todos os requests completaram com sucesso.
             // Se os CTS fossem dispostos, os timers seriam cancelados e o GC
@@ -373,15 +386,15 @@ public class NetXConnectionBugTests
     {
         public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
         {
-            if (message.Id != Guid.Empty)
-                return session.ReplyAsync(message.Id, new ArraySegment<byte>(new byte[] { 0x01 }), cancellationToken);
+            using var _ = message;
+            if (message.CorrelationId != 0)
+                return session.ReplyAsync(message.CorrelationId, new byte[] { 0x01 }, cancellationToken);
 
             return ValueTask.CompletedTask;
         }
 
         public ValueTask OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken) => ValueTask.CompletedTask;
         public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason) => ValueTask.CompletedTask;
-        public int GetReceiveMessageSize(INetXSession session, in ReadOnlyMemory<byte> buffer) => 0;
         public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
         public void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
     }
@@ -421,7 +434,7 @@ public class NetXConnectionBugTests
         var fightServer = NetXServerBuilder.Create(null, "FightServer")
             .Processor(fightProcessor)
             .EndPoint("127.0.0.1", (ushort)port)
-            .Duplex(true, timeout: 5000)
+            .DuplexTimeout(5000)
             .NoDelay(true)
             .ReceiveBufferSize(4096)
             .SendBufferSize(4096)
@@ -453,7 +466,7 @@ public class NetXConnectionBugTests
 
             // FightServer tenta enviar estado de sala para o GameServer
             // (que parou de ler — simulando sobrecarga)
-            var roomUpdate = new ArraySegment<byte>(new byte[1024]); // ~1 KB por update
+            var roomUpdate = new byte[1024]; // ~1 KB por update
             int sentCount = 0;
 
             var sendTask = Task.Run(async () =>
@@ -500,10 +513,12 @@ public class NetXConnectionBugTests
         }
 
         public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
-            => ValueTask.CompletedTask;
+        {
+            message.Dispose();
+            return ValueTask.CompletedTask;
+        }
 
         public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason) => ValueTask.CompletedTask;
-        public int GetReceiveMessageSize(INetXSession session, in ReadOnlyMemory<byte> buffer) => 0;
         public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
         public void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
     }
@@ -538,7 +553,7 @@ public class NetXConnectionBugTests
         var dbServer = NetXServerBuilder.Create(null, "DatabaseServer")
             .Processor(dbProcessor)
             .EndPoint("127.0.0.1", (ushort)port)
-            .Duplex(true, timeout: 30000)
+            .DuplexTimeout(30000)
             .NoDelay(true)
             .ReceiveBufferSize(65536)
             .SendBufferSize(65536)
@@ -555,7 +570,7 @@ public class NetXConnectionBugTests
             var gameClient = NetXClientBuilder.Create(null, "GameServer")
                 .Processor(gameProcessor)
                 .EndPoint("127.0.0.1", (ushort)port)
-                .Duplex(true, timeout: 30000)
+                .DuplexTimeout(30000)
                 .NoDelay(true)
                 .ReceiveBufferSize(65536)
                 .SendBufferSize(65536)
@@ -566,7 +581,7 @@ public class NetXConnectionBugTests
             await Task.Delay(200);
 
             // GameServer envia query ao DatabaseServer com timeout de 5 segundos
-            var queryPayload = new ArraySegment<byte>(new byte[] { 0x01, 0x02 });
+            var queryPayload = new byte[] { 0x01, 0x02 };
             var requestTask = gameClient.RequestAsync(queryPayload, TimeSpan.FromSeconds(5));
 
             // Espera o DatabaseServer receber a query
@@ -611,7 +626,8 @@ public class NetXConnectionBugTests
 
         public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
         {
-            if (message.Id != Guid.Empty)
+            using var _ = message;
+            if (message.CorrelationId != 0)
                 QueryReceived.TrySetResult();
 
             // Não responde — simula query que nunca termina (crash durante processamento)
@@ -620,7 +636,6 @@ public class NetXConnectionBugTests
 
         public ValueTask OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken) => ValueTask.CompletedTask;
         public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason) => ValueTask.CompletedTask;
-        public int GetReceiveMessageSize(INetXSession session, in ReadOnlyMemory<byte> buffer) => 0;
         public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
         public void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
     }
@@ -652,7 +667,7 @@ public class NetXConnectionBugTests
         var dbServer = NetXServerBuilder.Create(null, "DatabaseServer")
             .Processor(dbProcessor)
             .EndPoint("127.0.0.1", (ushort)port)
-            .Duplex(true, timeout: 5000)
+            .DuplexTimeout(5000)
             .NoDelay(true)
             .ReceiveBufferSize(65536)
             .SendBufferSize(65536)
@@ -668,7 +683,7 @@ public class NetXConnectionBugTests
             var gameClient = NetXClientBuilder.Create(null, "GameServer")
                 .Processor(gameProcessor)
                 .EndPoint("127.0.0.1", (ushort)port)
-                .Duplex(true, timeout: 5000)
+                .DuplexTimeout(5000)
                 .NoDelay(true)
                 .ReceiveBufferSize(65536)
                 .SendBufferSize(65536)
@@ -679,7 +694,7 @@ public class NetXConnectionBugTests
 
             // Primeiro: GameServer envia query de jogador corrompido.
             // O handler do DatabaseServer vai dar NullReferenceException.
-            var corruptedPlayerQuery = new ArraySegment<byte>(new byte[] { 0xFF, 0x01 });
+            var corruptedPlayerQuery = new byte[] { 0xFF, 0x01 };
             await gameClient.SendAsync(corruptedPlayerQuery);
 
             // Espera o DatabaseServer processar a mensagem (e o handler crashar)
@@ -711,6 +726,8 @@ public class NetXConnectionBugTests
     {
         public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
         {
+            using var ownedMessage = message;
+
             // 0xFF = indicador de jogador corrompido no protocolo
             if (message.Buffer.Span[0] == 0xFF)
             {
@@ -720,15 +737,14 @@ public class NetXConnectionBugTests
             }
 
             // Query normal — responde com sucesso
-            if (message.Id != Guid.Empty)
-                return session.ReplyAsync(message.Id, new ArraySegment<byte>(new byte[] { 0x01 }), cancellationToken);
+            if (message.CorrelationId != 0)
+                return session.ReplyAsync(message.CorrelationId, new byte[] { 0x01 }, cancellationToken);
 
             return ValueTask.CompletedTask;
         }
 
         public ValueTask OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken) => ValueTask.CompletedTask;
         public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason) => ValueTask.CompletedTask;
-        public int GetReceiveMessageSize(INetXSession session, in ReadOnlyMemory<byte> buffer) => 0;
         public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
         public void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
     }
@@ -764,7 +780,7 @@ public class NetXConnectionBugTests
         var dbServer = NetXServerBuilder.Create(null, "DatabaseServer")
             .Processor(dbProcessor)
             .EndPoint("127.0.0.1", (ushort)port)
-            .Duplex(true, timeout: 30000)
+            .DuplexTimeout(30000)
             .NoDelay(true)
             .ReceiveBufferSize(65536)
             .SendBufferSize(65536)
@@ -781,7 +797,7 @@ public class NetXConnectionBugTests
             var gameClient = NetXClientBuilder.Create(null, "GameServer")
                 .Processor(gameProcessor)
                 .EndPoint("127.0.0.1", (ushort)port)
-                .Duplex(true, timeout: 30000)
+                .DuplexTimeout(30000)
                 .NoDelay(true)
                 .ReceiveBufferSize(65536)
                 .SendBufferSize(65536)
@@ -793,7 +809,7 @@ public class NetXConnectionBugTests
 
             // GameServer pede ranking com timeout curto (1s).
             // O DatabaseServer vai demorar 3s para responder.
-            var rankingQuery = new ArraySegment<byte>(new byte[] { 0x10, 0x20 });
+            var rankingQuery = new byte[] { 0x10, 0x20 };
             var requestTask = gameClient.RequestAsync(rankingQuery, TimeSpan.FromSeconds(1));
 
             // Espera o timeout (1s) — o request falha
@@ -824,28 +840,32 @@ public class NetXConnectionBugTests
     {
         public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
         {
-            if (message.Id != Guid.Empty)
+            // Only the correlation id (a value copy) is needed by the background query — safe to
+            // dispose the message immediately.
+            using (message)
             {
-                var queryId = message.Id;
-                return SlowQueryAsync(session, queryId);
-            }
+                if (message.CorrelationId != 0)
+                {
+                    var queryId = message.CorrelationId;
+                    return SlowQueryAsync(session, queryId);
+                }
 
-            return ValueTask.CompletedTask;
+                return ValueTask.CompletedTask;
+            }
         }
 
-        private async ValueTask SlowQueryAsync(INetXSession session, Guid queryId)
+        private async ValueTask SlowQueryAsync(INetXSession session, ulong queryId)
         {
             // Simula query SQL pesada: SELECT * FROM rankings ORDER BY score DESC LIMIT 100
             await Task.Delay(3000);
 
             // Retorna resultado do ranking (payload realista)
-            var rankingResult = new ArraySegment<byte>(new byte[] { 0xAA, 0xBB, 0xCC });
+            var rankingResult = new byte[] { 0xAA, 0xBB, 0xCC };
             await session.ReplyAsync(queryId, rankingResult);
         }
 
         public ValueTask OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken) => ValueTask.CompletedTask;
         public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason) => ValueTask.CompletedTask;
-        public int GetReceiveMessageSize(INetXSession session, in ReadOnlyMemory<byte> buffer) => 0;
         public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
         public void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
     }
@@ -859,158 +879,23 @@ public class NetXConnectionBugTests
     {
         public int UnexpectedMessageCount;
 
-        public ValueTask OnReceivedMessageAsync(INetXClientSession client, NetXMessage message, CancellationToken cancellationToken)
+        public ValueTask OnReceivedMessageAsync(INetXConnection client, NetXMessage message, CancellationToken cancellationToken)
         {
+            using var _ = message;
             // Qualquer mensagem que chega aqui é inesperada — em duplex,
             // replies legítimos são resolvidos via _completions e nunca chegam ao handler.
             Interlocked.Increment(ref UnexpectedMessageCount);
             return ValueTask.CompletedTask;
         }
 
-        public ValueTask OnConnectedAsync(INetXClientSession client, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+        public ValueTask OnConnectedAsync(INetXConnection client, CancellationToken cancellationToken) => ValueTask.CompletedTask;
         public ValueTask OnDisconnectedAsync(DisconnectReason reason) => ValueTask.CompletedTask;
-        public int GetReceiveMessageSize(INetXClientSession client, in ReadOnlyMemory<byte> buffer) => 0;
-        public void ProcessReceivedBuffer(INetXClientSession client, in ReadOnlyMemory<byte> buffer) { }
-        public void ProcessSendBuffer(INetXClientSession client, in ReadOnlyMemory<byte> buffer) { }
+        public void ProcessReceivedBuffer(INetXConnection client, in ReadOnlyMemory<byte> buffer) { }
+        public void ProcessSendBuffer(INetXConnection client, in ReadOnlyMemory<byte> buffer) { }
     }
 
     #endregion
 
-    #region Bug 8 — SendAsync(Stream) corrompe pipe quando stream.ReadAsync falha
-
-    /// <summary>
-    /// Cenário real:
-    ///   GameServer envia dados de replay de partida ao DatabaseServer via IPC.
-    ///   O replay vem de um FileStream. Durante o envio, o disco falha
-    ///   (IOException no ReadAsync).
-    ///
-    ///   SendAsync(Stream) já escreveu o header (size + guid) no pipe writer
-    ///   ANTES de chamar stream.ReadAsync. Quando o ReadAsync falha, os bytes
-    ///   do header ficam órfãos no buffer do pipe writer. A próxima mensagem
-    ///   enviada faz FlushAsync, que envia os bytes órfãos junto com a nova
-    ///   mensagem — corrompendo o stream de dados.
-    ///
-    ///   O receiver tenta parsear os bytes órfãos como um frame válido.
-    ///   O campo size do header órfão aponta para bytes da próxima mensagem,
-    ///   causando parsing incorreto. A próxima mensagem é perdida ou truncada.
-    /// </summary>
-    [Fact]
-    public async Task GameServer_SendAfterStreamFailure_ShouldNotCorruptNextMessage()
-    {
-        var port = GetAvailablePort();
-        var dbProcessor = new MessageTrackingProcessor();
-
-        var dbServer = NetXServerBuilder.Create(null, "DatabaseServer")
-            .Processor(dbProcessor)
-            .EndPoint("127.0.0.1", (ushort)port)
-            .Duplex(true, timeout: 5000)
-            .NoDelay(true)
-            .ReceiveBufferSize(65536)
-            .SendBufferSize(65536)
-            .Build();
-
-        var serverCts = new CancellationTokenSource();
-        dbServer.Listen(serverCts.Token);
-        await Task.Delay(200);
-
-        try
-        {
-            var gameProcessor = new SimpleClientProcessor();
-            var gameClient = NetXClientBuilder.Create(null, "GameServer")
-                .Processor(gameProcessor)
-                .EndPoint("127.0.0.1", (ushort)port)
-                .Duplex(true, timeout: 5000)
-                .NoDelay(true)
-                .ReceiveBufferSize(65536)
-                .SendBufferSize(65536)
-                .Build();
-
-            await gameClient.ConnectAsync();
-            await Task.Delay(200);
-
-            // 1. Envia mensagem A (estado de jogo) — deve funcionar
-            await gameClient.SendAsync(new ArraySegment<byte>(new byte[] { 0xAA }));
-
-            // 2. Tenta enviar replay via Stream que falha no ReadAsync (disco corrompido)
-            var faultyReplay = new FaultyStream(reportedLength: 100);
-            try { await gameClient.SendAsync(faultyReplay); }
-            catch (IOException) { /* esperado — disco falhou */ }
-
-            // 3. Envia mensagem B (ação de jogador) — deve funcionar
-            await gameClient.SendAsync(new ArraySegment<byte>(new byte[] { 0xBB }));
-
-            // Espera o server processar (com margem generosa)
-            await Task.Delay(1000);
-
-            // ESPERADO: Server recebeu mensagem A (0xAA) e mensagem B (0xBB) corretamente.
-            // BUG: O header órfão do stream send (20 bytes com size=120) fica no pipe.
-            //      Quando mensagem B é enviada e FlushAsync roda, os bytes órfãos
-            //      são enviados junto. O receiver parseia size=120 dos bytes órfãos
-            //      e tenta ler 120 bytes — engolindo a mensagem B. O server nunca recebe B.
-            Assert.True(dbProcessor.ReceivedPayloads.Count >= 2,
-                $"Server recebeu apenas {dbProcessor.ReceivedPayloads.Count} mensagem(ns) ao invés de 2. " +
-                $"A falha no SendAsync(Stream) corrompeu o pipe — o header órfão (size+guid) " +
-                $"ficou no buffer do pipe writer e foi enviado junto com a próxima mensagem, " +
-                $"corrompendo o stream de dados.");
-        }
-        finally
-        {
-            serverCts.Cancel();
-        }
-    }
-
-    /// <summary>
-    /// Stream que simula falha de disco — ReadAsync sempre lança IOException.
-    /// Length e Position funcionam normalmente (o arquivo "existe" mas é ilegível).
-    /// </summary>
-    private class FaultyStream : Stream
-    {
-        private readonly int _reportedLength;
-
-        public FaultyStream(int reportedLength) { _reportedLength = reportedLength; }
-
-        public override bool CanRead => true;
-        public override bool CanSeek => true;
-        public override bool CanWrite => false;
-        public override long Length => _reportedLength;
-        public override long Position { get; set; }
-
-        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
-            => throw new IOException("Simulated disk read failure: bad sectors on replay file");
-
-        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
-            => throw new IOException("Simulated disk read failure: bad sectors on replay file");
-
-        public override int Read(byte[] buffer, int offset, int count)
-            => throw new IOException("Simulated disk read failure");
-
-        public override long Seek(long offset, SeekOrigin origin) => 0;
-        public override void SetLength(long value) { }
-        public override void Write(byte[] buffer, int offset, int count) { }
-        public override void Flush() { }
-    }
-
-    /// <summary>
-    /// Processor que rastreia todas as mensagens recebidas (payload de cada uma).
-    /// </summary>
-    private class MessageTrackingProcessor : INetXServerProcessor
-    {
-        public readonly ConcurrentBag<byte[]> ReceivedPayloads = new();
-
-        public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
-        {
-            ReceivedPayloads.Add(message.Buffer.ToArray());
-            return ValueTask.CompletedTask;
-        }
-
-        public ValueTask OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken) => ValueTask.CompletedTask;
-        public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason) => ValueTask.CompletedTask;
-        public int GetReceiveMessageSize(INetXSession session, in ReadOnlyMemory<byte> buffer) => 0;
-        public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
-        public void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
-    }
-
-    #endregion
 
     #region Bug 9 — RequestAsync órfã completion quando send falha
 
@@ -1037,7 +922,7 @@ public class NetXConnectionBugTests
         var dbServer = NetXServerBuilder.Create(null, "DatabaseServer")
             .Processor(dbProcessor)
             .EndPoint("127.0.0.1", (ushort)port)
-            .Duplex(true, timeout: 5000)
+            .DuplexTimeout(5000)
             .NoDelay(true)
             .ReceiveBufferSize(65536)
             .SendBufferSize(65536)
@@ -1053,7 +938,7 @@ public class NetXConnectionBugTests
             var gameClient = NetXClientBuilder.Create(null, "GameServer")
                 .Processor(gameProcessor)
                 .EndPoint("127.0.0.1", (ushort)port)
-                .Duplex(true, timeout: 5000)
+                .DuplexTimeout(5000)
                 .NoDelay(true)
                 .ReceiveBufferSize(65536)
                 .SendBufferSize(65536)
@@ -1073,7 +958,7 @@ public class NetXConnectionBugTests
                 try
                 {
                     await gameClient.RequestAsync(
-                        new ArraySegment<byte>(new byte[] { 0x01 }),
+                        new byte[] { 0x01 },
                         TimeSpan.FromSeconds(5),
                         cancelledCts.Token);
                 }
@@ -1081,11 +966,11 @@ public class NetXConnectionBugTests
             }
 
             // Verifica que um request normal ainda funciona (conexão está viva)
-            var normalResult = await gameClient.RequestAsync(
-                new ArraySegment<byte>(new byte[] { 0x02 }),
+            using var normalResult = await gameClient.RequestAsync(
+                new byte[] { 0x02 },
                 TimeSpan.FromSeconds(5));
 
-            Assert.NotNull(normalResult);
+            Assert.False(normalResult.Buffer.IsEmpty);
 
             // ESPERADO: As 20 completions órfãs foram limpas (ou nunca foram adicionadas).
             //           Não deveria haver completions pendentes além do request normal.
@@ -1138,7 +1023,7 @@ public class NetXConnectionBugTests
         var dbServer = NetXServerBuilder.Create(null, "DatabaseServer")
             .Processor(dbProcessor)
             .EndPoint("127.0.0.1", (ushort)port)
-            .Duplex(true, timeout: 10000)
+            .DuplexTimeout(10000)
             .NoDelay(true)
             .ReceiveBufferSize(65536)
             .SendBufferSize(65536)
@@ -1154,7 +1039,7 @@ public class NetXConnectionBugTests
             var gameClient = NetXClientBuilder.Create(null, "GameServer")
                 .Processor(gameProcessor)
                 .EndPoint("127.0.0.1", (ushort)port)
-                .Duplex(true, timeout: 10000)
+                .DuplexTimeout(10000)
                 .NoDelay(true)
                 .ReceiveBufferSize(65536)
                 .SendBufferSize(65536)
@@ -1165,11 +1050,11 @@ public class NetXConnectionBugTests
 
             // Dispara 50 requests concorrentes — cada um com payload único
             const int concurrentRequests = 50;
-            var tasks = new Task<ArraySegment<byte>>[concurrentRequests];
+            var tasks = new Task<NetXMessage>[concurrentRequests];
 
             for (int i = 0; i < concurrentRequests; i++)
             {
-                var payload = new ArraySegment<byte>(new byte[] { (byte)(i & 0xFF), (byte)(i >> 8) });
+                var payload = new byte[] { (byte)(i & 0xFF), (byte)(i >> 8) };
                 tasks[i] = gameClient.RequestAsync(payload, TimeSpan.FromSeconds(10));
             }
 
@@ -1180,14 +1065,14 @@ public class NetXConnectionBugTests
             int correctReplies = 0;
             for (int i = 0; i < concurrentRequests; i++)
             {
+                using var result = results[i];
                 var expected = new byte[] { 0xEE, (byte)(i & 0xFF), (byte)(i >> 8) };
-                var actual = results[i].Array;
+                var actual = result.Buffer.Span;
 
-                if (actual != null
-                    && actual.Length >= expected.Length
-                    && actual[results[i].Offset] == 0xEE
-                    && actual[results[i].Offset + 1] == expected[1]
-                    && actual[results[i].Offset + 2] == expected[2])
+                if (actual.Length >= expected.Length
+                    && actual[0] == 0xEE
+                    && actual[1] == expected[1]
+                    && actual[2] == expected[2])
                 {
                     correctReplies++;
                 }
@@ -1211,12 +1096,13 @@ public class NetXConnectionBugTests
     {
         public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
         {
-            if (message.Id != Guid.Empty)
+            using var _ = message;
+            if (message.CorrelationId != 0)
             {
                 var response = new byte[message.Buffer.Length + 1];
                 response[0] = 0xEE; // marker
                 message.Buffer.Span.CopyTo(response.AsSpan(1));
-                return session.ReplyAsync(message.Id, new ArraySegment<byte>(response), cancellationToken);
+                return session.ReplyAsync(message.CorrelationId, response, cancellationToken);
             }
 
             return ValueTask.CompletedTask;
@@ -1224,129 +1110,12 @@ public class NetXConnectionBugTests
 
         public ValueTask OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken) => ValueTask.CompletedTask;
         public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason) => ValueTask.CompletedTask;
-        public int GetReceiveMessageSize(INetXSession session, in ReadOnlyMemory<byte> buffer) => 0;
         public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
         public void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
     }
 
     #endregion
 
-    #region Bug 11 — ReplyAsync(Stream) corrompe pipe (mesma falha do Bug 8 mas não corrigida)
-
-    /// <summary>
-    /// Cenário real:
-    ///   DatabaseServer recebe query do GameServer. O resultado é grande (ranking
-    ///   de 10000 jogadores) e é lido de um FileStream de cache. O FileStream
-    ///   falha no ReadAsync (arquivo corrompido, disco removido, etc.).
-    ///
-    ///   ReplyAsync(Guid, Stream) escreve header (size+guid = 20 bytes) no pipe
-    ///   ANTES de ler o stream. Se o ReadAsync falha, os 20 bytes ficam órfãos.
-    ///   O handler captura a exceção e faz fallback com ReplyAsync(Guid, ArraySegment).
-    ///   O fallback faz FlushAsync que envia os bytes órfãos junto — corrompendo
-    ///   o stream de dados para o GameServer.
-    ///
-    ///   SendAsync(Stream) e RequestAsync(Stream) foram corrigidos no Bug 8,
-    ///   mas ReplyAsync(Stream) usa o mesmo padrão vulnerável e NÃO foi corrigido.
-    /// </summary>
-    [Fact]
-    public async Task DatabaseServer_ReplyWithStreamFailure_ShouldNotCorruptNextReply()
-    {
-        var port = GetAvailablePort();
-        var dbProcessor = new StreamReplyFallbackProcessor();
-
-        var dbServer = NetXServerBuilder.Create(null, "DatabaseServer")
-            .Processor(dbProcessor)
-            .EndPoint("127.0.0.1", (ushort)port)
-            .Duplex(true, timeout: 5000)
-            .NoDelay(true)
-            .ReceiveBufferSize(65536)
-            .SendBufferSize(65536)
-            .Build();
-
-        var serverCts = new CancellationTokenSource();
-        dbServer.Listen(serverCts.Token);
-        await Task.Delay(200);
-
-        try
-        {
-            var gameProcessor = new SimpleClientProcessor();
-            var gameClient = NetXClientBuilder.Create(null, "GameServer")
-                .Processor(gameProcessor)
-                .EndPoint("127.0.0.1", (ushort)port)
-                .Duplex(true, timeout: 5000)
-                .NoDelay(true)
-                .ReceiveBufferSize(65536)
-                .SendBufferSize(65536)
-                .Build();
-
-            await gameClient.ConnectAsync();
-            await Task.Delay(200);
-
-            // Request #1: Server tenta reply via Stream (falha), faz fallback com ArraySegment
-            var result1 = await gameClient.RequestAsync(
-                new ArraySegment<byte>(new byte[] { 0x01 }),
-                TimeSpan.FromSeconds(3));
-
-            // ESPERADO: Client recebe o fallback [0xFF, 0x01] (reply de erro gracioso)
-            // BUG: Os 20 bytes órfãos do ReplyAsync(Stream) corrompem o pipe.
-            //      O client recebe dados garbled ou timeout (size=120 do header órfão
-            //      faz o parser esperar 120 bytes que nunca chegam).
-            Assert.True(result1.Count >= 2,
-                $"Request #1 recebeu reply com {result1.Count} bytes ao invés de >= 2. " +
-                $"ReplyAsync(Stream) corrompeu o pipe quando o stream falhou.");
-
-            Assert.Equal(0xFF, result1.Array![result1.Offset]);
-        }
-        finally
-        {
-            serverCts.Cancel();
-        }
-    }
-
-    /// <summary>
-    /// DatabaseServer que tenta reply via Stream (falha) e faz fallback com ArraySegment.
-    /// Simula cenário real: resultado grande vem de cache de arquivo, disco falha,
-    /// handler faz fallback para resposta de erro.
-    /// </summary>
-    private class StreamReplyFallbackProcessor : INetXServerProcessor
-    {
-        public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
-        {
-            if (message.Id != Guid.Empty)
-                return TryStreamReplyWithFallback(session, message.Id, message.Buffer.ToArray());
-
-            return ValueTask.CompletedTask;
-        }
-
-        private async ValueTask TryStreamReplyWithFallback(INetXSession session, Guid queryId, byte[] request)
-        {
-            // Tenta reply com Stream de cache (falha — disco corrompido)
-            try
-            {
-                var faultyCache = new FaultyStream(reportedLength: 100);
-                await session.ReplyAsync(queryId, faultyCache);
-                return; // se chegou aqui, ok
-            }
-            catch (IOException)
-            {
-                // Disco falhou — fallback para resposta de erro inline
-            }
-
-            // Fallback: reply com dados de erro [0xFF] + request original
-            var fallback = new byte[request.Length + 1];
-            fallback[0] = 0xFF;
-            request.CopyTo(fallback, 1);
-            await session.ReplyAsync(queryId, new ArraySegment<byte>(fallback));
-        }
-
-        public ValueTask OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken) => ValueTask.CompletedTask;
-        public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason) => ValueTask.CompletedTask;
-        public int GetReceiveMessageSize(INetXSession session, in ReadOnlyMemory<byte> buffer) => 0;
-        public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
-        public void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
-    }
-
-    #endregion
 
     #region Bug 12 — Rajada de 10000 mensagens pequenas verifica integridade de framing
 
@@ -1370,7 +1139,7 @@ public class NetXConnectionBugTests
         var fightServer = NetXServerBuilder.Create(null, "FightServer")
             .Processor(fightProcessor)
             .EndPoint("127.0.0.1", (ushort)port)
-            .Duplex(true, timeout: 10000)
+            .DuplexTimeout(10000)
             .NoDelay(true)
             .ReceiveBufferSize(65536)
             .SendBufferSize(65536)
@@ -1386,7 +1155,7 @@ public class NetXConnectionBugTests
             var gameClient = NetXClientBuilder.Create(null, "GameServer")
                 .Processor(gameProcessor)
                 .EndPoint("127.0.0.1", (ushort)port)
-                .Duplex(true, timeout: 10000)
+                .DuplexTimeout(10000)
                 .NoDelay(true)
                 .ReceiveBufferSize(65536)
                 .SendBufferSize(65536)
@@ -1407,7 +1176,7 @@ public class NetXConnectionBugTests
                 BitConverter.TryWriteBytes(update.AsSpan(12, 4), i * 0.5f); // posZ
                 BitConverter.TryWriteBytes(update.AsSpan(16, 2), (short)(i % 256)); // flags
 
-                await gameClient.SendAsync(new ArraySegment<byte>(update));
+                await gameClient.SendAsync(update);
             }
 
             // Espera o FightServer processar todas as mensagens
@@ -1441,6 +1210,7 @@ public class NetXConnectionBugTests
 
         public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
         {
+            using var _ = message;
             LastPayload = message.Buffer.ToArray();
             Interlocked.Increment(ref ReceivedCount);
             return ValueTask.CompletedTask;
@@ -1448,9 +1218,544 @@ public class NetXConnectionBugTests
 
         public ValueTask OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken) => ValueTask.CompletedTask;
         public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason) => ValueTask.CompletedTask;
-        public int GetReceiveMessageSize(INetXSession session, in ReadOnlyMemory<byte> buffer) => 0;
         public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
         public void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
+    }
+
+    #endregion
+
+    #region NetX 3.0 — push, correlação, MaxFrameBytes, IPv6 dual-mode
+
+    /// <summary>
+    /// Frame novo: [i32 totalLength][u64 correlationId][payload]. correlationId == 0
+    /// identifica um push (fire-and-forget, sem reply esperado). Este teste garante que
+    /// SendAsync chega do outro lado com CorrelationId == 0 / IsPush == true.
+    /// </summary>
+    [Fact]
+    public async Task SendAsync_ShouldArriveAsPush_WithZeroCorrelationId()
+    {
+        var port = GetAvailablePort();
+        var serverProcessor = new PushCapturingProcessor();
+
+        var server = NetXServerBuilder.Create(null, "PushServer")
+            .Processor(serverProcessor)
+            .EndPoint("127.0.0.1", (ushort)port)
+            .Build();
+
+        var serverCts = new CancellationTokenSource();
+        server.Listen(serverCts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            var client = NetXClientBuilder.Create(null, "PushClient")
+                .Processor(new SimpleClientProcessor())
+                .EndPoint("127.0.0.1", (ushort)port)
+                .Build();
+
+            await client.ConnectAsync();
+            await Task.Delay(200);
+
+            await client.SendAsync(new byte[] { 0x09, 0x09 });
+
+            var result = await serverProcessor.PushReceived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Equal(0UL, result.CorrelationId);
+            Assert.True(result.IsPush);
+            Assert.Equal(new byte[] { 0x09, 0x09 }, result.Payload);
+        }
+        finally
+        {
+            serverCts.Cancel();
+        }
+    }
+
+    private class PushCapturingProcessor : INetXServerProcessor
+    {
+        public readonly TaskCompletionSource<(ulong CorrelationId, bool IsPush, byte[] Payload)> PushReceived =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
+        {
+            using var _ = message;
+            PushReceived.TrySetResult((message.CorrelationId, message.IsPush, message.Buffer.ToArray()));
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+        public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason) => ValueTask.CompletedTask;
+        public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
+        public void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
+    }
+
+    /// <summary>
+    /// O contador de correlação (Interlocked.Increment por conexão) nunca produz 0 (reservado
+    /// para push) e cada resposta deve corresponder exatamente ao request que a originou,
+    /// mesmo reaproveitando o mesmo contador ao longo de dezenas de requests sequenciais.
+    /// </summary>
+    [Fact]
+    public async Task RequestAsync_CorrelationIds_ShouldBeNonZero_AndRoundtripCorrectly()
+    {
+        var port = GetAvailablePort();
+        var serverProcessor = new EchoDatabaseProcessor();
+
+        var server = NetXServerBuilder.Create(null, "CorrelationServer")
+            .Processor(serverProcessor)
+            .EndPoint("127.0.0.1", (ushort)port)
+            .Build();
+
+        var serverCts = new CancellationTokenSource();
+        server.Listen(serverCts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            var client = NetXClientBuilder.Create(null, "CorrelationClient")
+                .Processor(new SimpleClientProcessor())
+                .EndPoint("127.0.0.1", (ushort)port)
+                .Build();
+
+            await client.ConnectAsync();
+            await Task.Delay(200);
+
+            for (byte i = 0; i < 10; i++)
+            {
+                using var result = await client.RequestAsync(new byte[] { i }, TimeSpan.FromSeconds(5));
+                Assert.Equal(0xEE, result.Buffer.Span[0]);
+                Assert.Equal(i, result.Buffer.Span[1]);
+            }
+        }
+        finally
+        {
+            serverCts.Cancel();
+        }
+    }
+
+    /// <summary>
+    /// Fix crítico: MaxFrameBytes (default 16 MiB) é desacoplado de RecvBufferSize. Um frame
+    /// bem maior que RecvBufferSize (aqui deixado no default de 1024 bytes) deve simplesmente
+    /// acumular pelos segmentos do Pipe até ficar completo, em vez de lançar/matar a sessão.
+    /// </summary>
+    [Fact]
+    public async Task Frame_ExactlyAtMaxFrameBytes_ShouldBeAcceptedEvenAboveRecvBufferSize()
+    {
+        var port = GetAvailablePort();
+        const int maxFrameBytes = 64 * 1024; // bem maior que o RecvBufferSize default (1024)
+        var serverProcessor = new CountingProcessor();
+
+        var server = NetXServerBuilder.Create(null, "FrameLimitServer")
+            .Processor(serverProcessor)
+            .EndPoint("127.0.0.1", (ushort)port)
+            .MaxFrameBytes(maxFrameBytes)
+            .Build();
+
+        var serverCts = new CancellationTokenSource();
+        server.Listen(serverCts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            using var raw = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            await raw.ConnectAsync(new IPEndPoint(IPAddress.Parse("127.0.0.1"), port));
+
+            var payload = new byte[maxFrameBytes];
+            new Random(42).NextBytes(payload);
+
+            var frame = new byte[4 + 8 + payload.Length];
+            BitConverter.TryWriteBytes(frame.AsSpan(0, 4), 4 + 8 + payload.Length);
+            BitConverter.TryWriteBytes(frame.AsSpan(4, 8), 0UL); // push
+            payload.CopyTo(frame.AsSpan(12));
+
+            await raw.SendAsync(frame, SocketFlags.None);
+
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (serverProcessor.ReceivedCount < 1 && DateTime.UtcNow < deadline)
+                await Task.Delay(50);
+
+            Assert.Equal(1, serverProcessor.ReceivedCount);
+            Assert.Equal(payload, serverProcessor.LastPayload);
+        }
+        finally
+        {
+            serverCts.Cancel();
+        }
+    }
+
+    /// <summary>
+    /// Frame acima de MaxFrameBytes é erro de protocolo: a sessão deve ser desconectada
+    /// graciosamente (não crashar o processo, não travar a conexão).
+    /// </summary>
+    [Fact]
+    public async Task Frame_AboveMaxFrameBytes_ShouldDisconnectInsteadOfHanging()
+    {
+        var port = GetAvailablePort();
+        const int maxFrameBytes = 64 * 1024;
+        var serverProcessor = new MasterServerProcessor();
+
+        var server = NetXServerBuilder.Create(null, "FrameLimitServer")
+            .Processor(serverProcessor)
+            .EndPoint("127.0.0.1", (ushort)port)
+            .MaxFrameBytes(maxFrameBytes)
+            .Build();
+
+        var serverCts = new CancellationTokenSource();
+        server.Listen(serverCts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            using var raw = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            await raw.ConnectAsync(new IPEndPoint(IPAddress.Parse("127.0.0.1"), port));
+
+            await serverProcessor.SessionConnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var payload = new byte[maxFrameBytes + 1];
+            var frame = new byte[4 + 8 + payload.Length];
+            BitConverter.TryWriteBytes(frame.AsSpan(0, 4), 4 + 8 + payload.Length);
+            BitConverter.TryWriteBytes(frame.AsSpan(4, 8), 0UL);
+            payload.CopyTo(frame.AsSpan(12));
+
+            await raw.SendAsync(frame, SocketFlags.None);
+
+            var disconnectReason = await serverProcessor.Disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.NotEqual(DisconnectReason.NONE, disconnectReason);
+        }
+        finally
+        {
+            serverCts.Cancel();
+        }
+    }
+
+    /// <summary>
+    /// O socket de listen agora é IPv6 dual-mode: um server escutando em "0.0.0.0"
+    /// (mapeado internamente para IPv6Any) deve aceitar tanto clientes IPv4 (cobertos pelos
+    /// outros testes) quanto clientes IPv6 nativos (::1) na mesma porta.
+    /// </summary>
+    [Fact]
+    public async Task Server_DualModeSocket_ShouldAcceptNativeIPv6LoopbackClient()
+    {
+        var port = GetAvailablePort();
+        var serverProcessor = new EchoDatabaseProcessor();
+
+        var server = NetXServerBuilder.Create(null, "DualModeServer")
+            .Processor(serverProcessor)
+            .EndPoint("0.0.0.0", (ushort)port)
+            .Build();
+
+        var serverCts = new CancellationTokenSource();
+        server.Listen(serverCts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            var client = NetXClientBuilder.Create(null, "IPv6Client")
+                .Processor(new SimpleClientProcessor())
+                .EndPoint(new IPEndPoint(IPAddress.IPv6Loopback, port))
+                .Build();
+
+            await client.ConnectAsync();
+            await Task.Delay(200);
+
+            using var result = await client.RequestAsync(new byte[] { 0x42 }, TimeSpan.FromSeconds(5));
+
+            Assert.Equal(0xEE, result.Buffer.Span[0]);
+            Assert.Equal(0x42, result.Buffer.Span[1]);
+        }
+        finally
+        {
+            serverCts.Cancel();
+        }
+    }
+
+    #endregion
+
+    #region Final round — correlation-id namespaces, oversized frames, ownership, cancellation
+
+    /// <summary>
+    /// Cenário real (bug crítico não coberto pela rodada anterior):
+    ///   Client e server têm cada um seu próprio contador de correlationId por conexão, e ambos
+    ///   começavam em 1. Se os dois lados disparam requests simultâneos um para o outro, os ids
+    ///   colidem (ex: request do client id=1 E request do server id=1 ao mesmo tempo). Quando a
+    ///   reply do lado remoto chega, ReadPipeAsync casa pelo correlationId em `_completions` — e
+    ///   como o id é o mesmo, o lado local pode casar a reply errada com o request errado
+    ///   (false reply / cross-contamination silenciosa, não um crash).
+    ///
+    ///   Fix: cada papel reivindica um namespace disjunto de ids (client = ímpar, server = par,
+    ///   ambos incrementando de 2 em 2). Este teste dispara dezenas de requests concorrentes nos
+    ///   DOIS sentidos ao mesmo tempo e verifica que cada resposta corresponde exatamente ao
+    ///   request que a originou, nos dois lados.
+    /// </summary>
+    [Fact]
+    public async Task Bidirectional_ConcurrentRequests_ShouldNotCrossReplies()
+    {
+        var port = GetAvailablePort();
+        var serverProcessor = new BidiServerProcessor();
+
+        var server = NetXServerBuilder.Create(null, "BidiServer")
+            .Processor(serverProcessor)
+            .EndPoint("127.0.0.1", (ushort)port)
+            .DuplexTimeout(10000)
+            .Build();
+
+        var serverCts = new CancellationTokenSource();
+        server.Listen(serverCts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            var clientProcessor = new BidiClientProcessor();
+            var client = NetXClientBuilder.Create(null, "BidiClient")
+                .Processor(clientProcessor)
+                .EndPoint("127.0.0.1", (ushort)port)
+                .DuplexTimeout(10000)
+                .Build();
+
+            await client.ConnectAsync();
+            await Task.Delay(200);
+
+            var session = await serverProcessor.SessionConnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            const int requestsPerDirection = 25;
+
+            // Fired at the same time on purpose: both sides' correlation counters are near their
+            // starting value simultaneously, which is exactly when an id collision would happen
+            // without the parity split.
+            var clientToServer = Task.Run(async () =>
+            {
+                var tasks = new Task<NetXMessage>[requestsPerDirection];
+                for (var i = 0; i < requestsPerDirection; i++)
+                    tasks[i] = client.RequestAsync(new byte[] { (byte)i }, TimeSpan.FromSeconds(10));
+
+                var results = await Task.WhenAll(tasks);
+                for (var i = 0; i < requestsPerDirection; i++)
+                {
+                    using var result = results[i];
+                    Assert.Equal(0xC1, result.Buffer.Span[0]);
+                    Assert.Equal((byte)i, result.Buffer.Span[1]);
+                }
+            });
+
+            var serverToClient = Task.Run(async () =>
+            {
+                var tasks = new Task<NetXMessage>[requestsPerDirection];
+                for (var i = 0; i < requestsPerDirection; i++)
+                    tasks[i] = session.RequestAsync(new byte[] { (byte)i }, TimeSpan.FromSeconds(10));
+
+                var results = await Task.WhenAll(tasks);
+                for (var i = 0; i < requestsPerDirection; i++)
+                {
+                    using var result = results[i];
+                    Assert.Equal(0xC2, result.Buffer.Span[0]);
+                    Assert.Equal((byte)i, result.Buffer.Span[1]);
+                }
+            });
+
+            await Task.WhenAll(clientToServer, serverToClient);
+        }
+        finally
+        {
+            serverCts.Cancel();
+        }
+    }
+
+    /// <summary>
+    /// Server side of the bidirectional test: replies to client-initiated requests with
+    /// [0xC1][echo], marking it came from the server's reply path.
+    /// </summary>
+    private class BidiServerProcessor : INetXServerProcessor
+    {
+        public readonly TaskCompletionSource<INetXSession> SessionConnected = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken)
+        {
+            SessionConnected.TrySetResult(session);
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
+        {
+            using var _ = message;
+            if (message.CorrelationId == 0)
+                return ValueTask.CompletedTask;
+
+            var response = new byte[] { 0xC1, message.Buffer.Span[0] };
+            return session.ReplyAsync(message.CorrelationId, response, cancellationToken);
+        }
+
+        public ValueTask OnSessionDisconnectAsync(Guid sessionId, DisconnectReason reason) => ValueTask.CompletedTask;
+        public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
+        public void ProcessSendBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer) { }
+    }
+
+    /// <summary>
+    /// Client side of the bidirectional test: any inbound message here is a genuine request
+    /// initiated by the server (client-side replies to its own requests never reach this handler,
+    /// they're resolved via _completions) — replies with [0xC2][echo].
+    /// </summary>
+    private class BidiClientProcessor : INetXClientProcessor
+    {
+        public ValueTask OnConnectedAsync(INetXConnection client, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+        public ValueTask OnDisconnectedAsync(DisconnectReason reason) => ValueTask.CompletedTask;
+
+        public ValueTask OnReceivedMessageAsync(INetXConnection client, NetXMessage message, CancellationToken cancellationToken)
+        {
+            using var _ = message;
+            if (message.CorrelationId == 0)
+                return ValueTask.CompletedTask;
+
+            var response = new byte[] { 0xC2, message.Buffer.Span[0] };
+            return client.ReplyAsync(message.CorrelationId, response, cancellationToken);
+        }
+
+        public void ProcessReceivedBuffer(INetXConnection client, in ReadOnlyMemory<byte> buffer) { }
+        public void ProcessSendBuffer(INetXConnection client, in ReadOnlyMemory<byte> buffer) { }
+    }
+
+    /// <summary>
+    /// Fix crítico: o envio de um frame válido não pode depender de SendBufferSize — esse valor só
+    /// dimensiona o buffer de socket no nível de SO agora. Antes, TryGetSendMessage copiava cada
+    /// frame inteiro para um scratch buffer do tamanho de SendBufferSize e lançava exceção se o
+    /// frame não coubesse. Aqui SendBufferSize é propositalmente minúsculo (512 bytes) e o payload
+    /// é ~400x maior — o frame deve ser transmitido em loop pelos segmentos do pipe, com envios
+    /// parciais de socket completados corretamente, e chegar intacto do outro lado.
+    /// </summary>
+    [Fact]
+    public async Task RequestAsync_PayloadMuchLargerThanSendBufferSize_ShouldBeDeliveredIntact()
+    {
+        var port = GetAvailablePort();
+        var serverProcessor = new EchoDatabaseProcessor();
+
+        var server = NetXServerBuilder.Create(null, "OversizedFrameServer")
+            .Processor(serverProcessor)
+            .EndPoint("127.0.0.1", (ushort)port)
+            .SendBufferSize(512)
+            .ReceiveBufferSize(512)
+            .MaxFrameBytes(1024 * 1024)
+            .DuplexTimeout(10000)
+            .Build();
+
+        var serverCts = new CancellationTokenSource();
+        server.Listen(serverCts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            var client = NetXClientBuilder.Create(null, "OversizedFrameClient")
+                .Processor(new SimpleClientProcessor())
+                .EndPoint("127.0.0.1", (ushort)port)
+                .SendBufferSize(512)
+                .ReceiveBufferSize(512)
+                .MaxFrameBytes(1024 * 1024)
+                .DuplexTimeout(10000)
+                .Build();
+
+            await client.ConnectAsync();
+            await Task.Delay(200);
+
+            var payload = new byte[200_000]; // ~400x SendBufferSize
+            new Random(7).NextBytes(payload);
+
+            using var result = await client.RequestAsync(payload, TimeSpan.FromSeconds(15));
+
+            Assert.Equal(0xEE, result.Buffer.Span[0]);
+            Assert.True(result.Buffer.Span[1..].SequenceEqual(payload));
+        }
+        finally
+        {
+            serverCts.Cancel();
+        }
+    }
+
+    /// <summary>
+    /// Contrato de ownership do NetXMessage: quem recebe a instância é dono do buffer pooled e deve
+    /// dispor exatamente uma vez. Dispose deve ser idempotente (chamar de novo não deve corromper o
+    /// pool nem lançar), e acessar Buffer após Dispose deve falhar explicitamente em vez de expor um
+    /// array que já pode ter sido devolvido/realugado pelo pool para outro dono.
+    /// </summary>
+    [Fact]
+    public void NetXMessage_Dispose_IsIdempotent_AndBufferThrowsAfterDispose()
+    {
+        var owner = MemoryOwner<byte>.Allocate(4);
+        owner.Span[0] = 0xAB;
+        var message = new NetXMessage(7, owner);
+
+        Assert.Equal(0xAB, message.Buffer.Span[0]);
+
+        message.Dispose();
+        message.Dispose(); // idempotent — must not throw or double-return the array to the pool
+
+        Assert.Throws<ObjectDisposedException>(() => message.Buffer);
+    }
+
+    /// <summary>
+    /// Fix: RequestAsync adicionava a completion em _completions ANTES de adquirir o semáforo de
+    /// envio. Se o cancellationToken já está cancelado (ou é cancelado antes do flush), o método
+    /// lança sem nunca chamar WaitForRequestAsync — que é o único outro lugar que remove a entry —
+    /// deixando a completion órfã para sempre. Este teste dispara uma rajada de requests
+    /// pré-cancelados e verifica, via reflexão sobre o dicionário interno, que nenhuma completion
+    /// fica presa: nem durante a rajada, nem depois que um request normal subsequente resolve.
+    /// </summary>
+    [Fact]
+    public async Task RequestAsync_CancelledBeforeSend_ShouldNotLeaveOrphanedCompletions()
+    {
+        var port = GetAvailablePort();
+        var dbProcessor = new FastDatabaseProcessor();
+
+        var dbServer = NetXServerBuilder.Create(null, "OrphanCheckServer")
+            .Processor(dbProcessor)
+            .EndPoint("127.0.0.1", (ushort)port)
+            .DuplexTimeout(5000)
+            .Build();
+
+        var serverCts = new CancellationTokenSource();
+        dbServer.Listen(serverCts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            var gameClient = NetXClientBuilder.Create(null, "OrphanCheckClient")
+                .Processor(new SimpleClientProcessor())
+                .EndPoint("127.0.0.1", (ushort)port)
+                .DuplexTimeout(5000)
+                .Build();
+
+            await gameClient.ConnectAsync();
+            await Task.Delay(200);
+
+            var cancelledCts = new CancellationTokenSource();
+            cancelledCts.Cancel();
+
+            for (var i = 0; i < 30; i++)
+            {
+                try
+                {
+                    await gameClient.RequestAsync(new byte[] { 0x01 }, TimeSpan.FromSeconds(5), cancelledCts.Token);
+                }
+                catch (OperationCanceledException) { /* expected */ }
+            }
+
+            Assert.Equal(0, GetPendingCompletionsCount(gameClient));
+
+            using var normalResult = await gameClient.RequestAsync(new byte[] { 0x02 }, TimeSpan.FromSeconds(5));
+            Assert.False(normalResult.Buffer.IsEmpty);
+
+            // The completion tracked for the request above must be gone once it resolved too.
+            Assert.Equal(0, GetPendingCompletionsCount(gameClient));
+
+            gameClient.Disconnect();
+        }
+        finally
+        {
+            serverCts.Cancel();
+        }
+    }
+
+    private static int GetPendingCompletionsCount(INetXConnection connection)
+    {
+        var field = typeof(NetXConnection).GetField("_completions", BindingFlags.NonPublic | BindingFlags.Instance);
+        var dict = (ICollection)field!.GetValue(connection);
+        return dict!.Count;
     }
 
     #endregion
@@ -1463,12 +1768,17 @@ public class NetXConnectionBugTests
     /// </summary>
     private class SimpleClientProcessor : INetXClientProcessor
     {
-        public ValueTask OnConnectedAsync(INetXClientSession client, CancellationToken cancellationToken) => ValueTask.CompletedTask;
-        public ValueTask OnReceivedMessageAsync(INetXClientSession client, NetXMessage message, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+        public ValueTask OnConnectedAsync(INetXConnection client, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+
+        public ValueTask OnReceivedMessageAsync(INetXConnection client, NetXMessage message, CancellationToken cancellationToken)
+        {
+            message.Dispose();
+            return ValueTask.CompletedTask;
+        }
+
         public ValueTask OnDisconnectedAsync(DisconnectReason reason) => ValueTask.CompletedTask;
-        public int GetReceiveMessageSize(INetXClientSession client, in ReadOnlyMemory<byte> buffer) => 0;
-        public void ProcessReceivedBuffer(INetXClientSession client, in ReadOnlyMemory<byte> buffer) { }
-        public void ProcessSendBuffer(INetXClientSession client, in ReadOnlyMemory<byte> buffer) { }
+        public void ProcessReceivedBuffer(INetXConnection client, in ReadOnlyMemory<byte> buffer) { }
+        public void ProcessSendBuffer(INetXConnection client, in ReadOnlyMemory<byte> buffer) { }
     }
 
     #endregion

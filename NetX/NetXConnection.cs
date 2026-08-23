@@ -1,10 +1,9 @@
-﻿using System;
+using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
-using System.IO;
 using System.IO.Pipelines;
 using System.Net.Sockets;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.HighPerformance.Buffers;
@@ -30,8 +29,7 @@ namespace NetX
 
         private readonly Pipe _sendPipe;
         private readonly Pipe _receivePipe;
-        private readonly ConcurrentDictionary<Guid, TaskCompletionSource<ArraySegment<byte>>> _completions;
-        private readonly ConcurrentDictionary<Guid, byte> _timedOutCompletions;
+        private readonly ConcurrentDictionary<ulong, TaskCompletionSource<NetXMessage>> _completions;
 
         private readonly CancellationTokenSource _connCancellationTokenSource;
 
@@ -42,11 +40,36 @@ namespace NetX
 
         private readonly SemaphoreSlim _semaphore;
 
-        const int GUID_LEN = 16;
-        private static readonly byte[] _emptyGuid = Guid.Empty.ToByteArray();
+        private long _correlationCounter;
 
+        // Frame: [i32 totalLength][u64 correlationId][payload]
+        // totalLength is self-inclusive: it counts the whole frame on the wire, including its own 4 bytes.
+        // correlationId == 0 means push (no reply expected).
+        private const int LENGTH_LEN = sizeof(int);
+        private const int CORRELATION_LEN = sizeof(ulong);
+        private const int HEADER_LEN = LENGTH_LEN + CORRELATION_LEN;
+        private const ulong PUSH_CORRELATION_ID = 0;
 
-        public NetXConnection(Socket socket, NetXConnectionOptions options, string name, ILogger logger, bool reuseSocket = false)
+        // Directional correlation-id namespaces. Both peers on a connection run their own independent
+        // counter starting at 1 — with no namespace split, a client-initiated request and a
+        // server-initiated request happening at the same moment can land on the exact same id, and
+        // whichever side's reply arrives first gets matched against the WRONG pending completion
+        // (a false reply — silent data corruption, not a crash). To make ids unambiguous without any
+        // cross-peer coordination, each role claims a disjoint parity: the role that dials out
+        // (NetXClient) only ever generates odd ids, the role that accepts (NetXSession) only ever
+        // generates even ids; both step by 2. An incoming non-zero correlationId can then be
+        // classified purely by its parity, no dictionary lookup required to tell the two cases apart:
+        //   - parity == our own role's parity  -> this id space is ours; it must be a reply to one of
+        //     OUR outstanding requests (or a stale reply for one that already timed out/was cancelled
+        //     — safe to drop, since a genuine peer-initiated request could never land here).
+        //   - parity == the other role's parity -> the peer generated this id for a request of ITS
+        //     own; dispatch to the message handler, which is expected to ReplyAsync with the same id.
+        // This is also what lets the previous timed-out-completions tombstone set be deleted outright:
+        // an id in our own namespace that isn't in _completions is unambiguously stale, no bookkeeping
+        // required to prove it isn't secretly a fresh peer request.
+        private readonly ulong _localCorrelationParity;
+
+        public NetXConnection(Socket socket, NetXConnectionOptions options, string name, ILogger logger, bool isClientRole, bool reuseSocket = false)
         {
             _socket = socket;
             _options = options;
@@ -56,14 +79,18 @@ namespace NetX
 
             _sendPipe = new Pipe();
             _receivePipe = new Pipe();
-            _completions = new ConcurrentDictionary<Guid, TaskCompletionSource<ArraySegment<byte>>>();
-            _timedOutCompletions = new ConcurrentDictionary<Guid, byte>();
+            _completions = new ConcurrentDictionary<ulong, TaskCompletionSource<NetXMessage>>();
 
             _connCancellationTokenSource = new CancellationTokenSource();
 
             _reuseSocket = reuseSocket;
 
             _semaphore = new SemaphoreSlim(1, 1);
+
+            // Client counter starts at -1 so the first Add(2) yields 1 (odd); server counter starts
+            // at 0 so the first Add(2) yields 2 (even). See _localCorrelationParity remarks above.
+            _correlationCounter = isClientRole ? -1 : 0;
+            _localCorrelationParity = isClientRole ? 1UL : 0UL;
 
             socket.NoDelay = _options.NoDelay;
             socket.LingerState = new LingerOption(true, 5);
@@ -80,7 +107,7 @@ namespace NetX
 
         #region Send Methods
 
-        public async ValueTask SendAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken = default)
+        public async ValueTask SendAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
         {
             if (cancellationToken.IsCancellationRequested)
                 return;
@@ -88,19 +115,7 @@ namespace NetX
             await _semaphore.WaitAsync(cancellationToken);
             try
             {
-                var size = buffer.Count + (_options.Duplex ? sizeof(int) + GUID_LEN : 0);
-                BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
-                _sendPipe.Writer.Advance(sizeof(int));
-
-                if (_options.Duplex)
-                {
-                    _sendPipe.Writer.Write(_emptyGuid);
-                }
-
-                var memory = _sendPipe.Writer.GetMemory(buffer.Count);
-                buffer.AsMemory().CopyTo(memory);
-
-                _sendPipe.Writer.Advance(buffer.Count);
+                WriteFrame(PUSH_CORRELATION_ID, buffer.Span);
 
                 if (!_connCancellationTokenSource.IsCancellationRequested)
                     await _sendPipe.Writer.FlushAsync(_connCancellationTokenSource.Token);
@@ -111,179 +126,64 @@ namespace NetX
             }
         }
 
-        public async ValueTask SendAsync(Stream stream, CancellationToken cancellationToken = default)
+        /// <summary>
+        /// Sends a duplex request and awaits the reply. The returned <see cref="NetXMessage"/> owns a
+        /// pooled buffer — the caller must dispose it (see <see cref="NetXMessage"/>).
+        /// </summary>
+        public async Task<NetXMessage> RequestAsync(ReadOnlyMemory<byte> buffer, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
-            if (cancellationToken.IsCancellationRequested)
-                return;
-
-            await _semaphore.WaitAsync(cancellationToken);
-            try
-            {
-                stream.Position = 0;
-                var streamLength = (int)stream.Length;
-
-                // Read stream into temporary buffer BEFORE writing to the pipe.
-                // If the read fails (IOException, etc.), the pipe is untouched — no corruption.
-                var rentedBuffer = ArrayPool<byte>.Shared.Rent(streamLength);
-                int bytesRead;
-                try
-                {
-                    bytesRead = await stream.ReadAsync(rentedBuffer.AsMemory(0, streamLength), cancellationToken);
-                }
-                catch
-                {
-                    ArrayPool<byte>.Shared.Return(rentedBuffer);
-                    throw;
-                }
-
-                try
-                {
-                    if (bytesRead != 0)
-                    {
-                        var size = bytesRead + (_options.Duplex ? sizeof(int) + GUID_LEN : 0);
-                        BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
-                        _sendPipe.Writer.Advance(sizeof(int));
-
-                        if (_options.Duplex)
-                        {
-                            _sendPipe.Writer.Write(_emptyGuid);
-                        }
-
-                        var memory = _sendPipe.Writer.GetMemory(bytesRead);
-                        rentedBuffer.AsMemory(0, bytesRead).CopyTo(memory);
-                        _sendPipe.Writer.Advance(bytesRead);
-
-                        if (!_connCancellationTokenSource.IsCancellationRequested)
-                            await _sendPipe.Writer.FlushAsync(_connCancellationTokenSource.Token);
-                    }
-                }
-                finally
-                {
-                    ArrayPool<byte>.Shared.Return(rentedBuffer);
-                }
-            }
-            finally
-            {
-                _semaphore.Release();
-            }
-        }
-
-        public async Task<ArraySegment<byte>> RequestAsync(ArraySegment<byte> buffer, TimeSpan timeout, CancellationToken cancellationToken = default)
-        {
-            if (!_options.Duplex)
-                throw new NotSupportedException(
-                    $"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
-
             if (cancellationToken.IsCancellationRequested)
                 throw new OperationCanceledException();
 
-            var messageId = Guid.NewGuid();
+            var correlationId = NextCorrelationId();
             var completion =
-                new TaskCompletionSource<ArraySegment<byte>>(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_completions.TryAdd(messageId, completion))
-                throw new Exception($"Cannot track completion for MessageId = {messageId}");
+                new TaskCompletionSource<NetXMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_completions.TryAdd(correlationId, completion))
+                throw new Exception($"Cannot track completion for CorrelationId = {correlationId}");
 
-            await _semaphore.WaitAsync(cancellationToken);
             try
             {
-                var size = buffer.Count + sizeof(int) + GUID_LEN;
-                BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
-                _sendPipe.Writer.Advance(sizeof(int));
-
-                messageId.TryWriteBytes(_sendPipe.Writer.GetSpan(GUID_LEN));
-                _sendPipe.Writer.Advance(GUID_LEN);
-
-                var memory = _sendPipe.Writer.GetMemory(buffer.Count);
-                buffer.AsMemory().CopyTo(memory);
-
-                _sendPipe.Writer.Advance(buffer.Count);
-
-                if (!_connCancellationTokenSource.IsCancellationRequested)
-                    await _sendPipe.Writer.FlushAsync(_connCancellationTokenSource.Token);
-            }
-            finally
-            {
-                _semaphore.Release();
-            }
-
-            return await WaitForRequestAsync(messageId, completion, timeout, cancellationToken);
-        }
-
-        public async Task<ArraySegment<byte>> RequestAsync(Stream stream, TimeSpan timeout, CancellationToken cancellationToken = default)
-        {
-            if (!_options.Duplex)
-                throw new NotSupportedException($"Cannot use RequestAsync with {nameof(_options.Duplex)} option disabled");
-
-            if (cancellationToken.IsCancellationRequested)
-                throw new OperationCanceledException();
-
-            var messageId = Guid.NewGuid();
-            var completion = new TaskCompletionSource<ArraySegment<byte>>(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_completions.TryAdd(messageId, completion))
-                throw new Exception($"Cannot track completion for MessageId = {messageId}");
-
-            await _semaphore.WaitAsync(cancellationToken);
-            try
-            {
-                stream.Position = 0;
-                var streamLength = (int)stream.Length;
-
-                // Read stream into temporary buffer BEFORE writing to the pipe.
-                var rentedBuffer = ArrayPool<byte>.Shared.Rent(streamLength);
-                int bytesRead;
+                await _semaphore.WaitAsync(cancellationToken);
                 try
                 {
-                    bytesRead = await stream.ReadAsync(rentedBuffer.AsMemory(0, streamLength), cancellationToken);
-                }
-                catch
-                {
-                    ArrayPool<byte>.Shared.Return(rentedBuffer);
-                    throw;
-                }
+                    WriteFrame(correlationId, buffer.Span);
 
-                try
-                {
-                    if (bytesRead != 0)
-                    {
-                        var size = bytesRead + sizeof(int) + GUID_LEN;
-                        BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
-                        _sendPipe.Writer.Advance(sizeof(int));
-
-                        messageId.TryWriteBytes(_sendPipe.Writer.GetSpan(GUID_LEN));
-                        _sendPipe.Writer.Advance(GUID_LEN);
-
-                        var memory = _sendPipe.Writer.GetMemory(bytesRead);
-                        rentedBuffer.AsMemory(0, bytesRead).CopyTo(memory);
-                        _sendPipe.Writer.Advance(bytesRead);
-
-                        if (!_connCancellationTokenSource.IsCancellationRequested)
-                            await _sendPipe.Writer.FlushAsync(_connCancellationTokenSource.Token);
-                    }
+                    if (!_connCancellationTokenSource.IsCancellationRequested)
+                        await _sendPipe.Writer.FlushAsync(_connCancellationTokenSource.Token);
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(rentedBuffer);
+                    _semaphore.Release();
                 }
             }
-            finally
+            catch
             {
-                _semaphore.Release();
+                // The frame never made it onto the wire (cancelled while waiting for the semaphore,
+                // or the flush itself was cancelled/failed) — WaitForRequestAsync, which is the only
+                // other place that removes this entry, is never reached below. Without this, the
+                // completion is orphaned in _completions for the lifetime of the connection.
+                _completions.TryRemove(correlationId, out _);
+                throw;
             }
 
-            return await WaitForRequestAsync(messageId, completion, timeout, cancellationToken);
+            return await WaitForRequestAsync(correlationId, completion, timeout, cancellationToken);
         }
 
-        public Task<ArraySegment<byte>> RequestAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken = default)
+        public Task<NetXMessage> RequestAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
         {
             return RequestAsync(buffer, TimeSpan.Zero, cancellationToken);
         }
 
-        public Task<ArraySegment<byte>> RequestAsync(Stream stream, CancellationToken cancellationToken = default)
+        private ulong NextCorrelationId()
         {
-            return RequestAsync(stream, TimeSpan.Zero, cancellationToken);
+            // Interlocked, stepping by 2 to stay within our role's parity — see
+            // _localCorrelationParity remarks for why this must not overlap the peer's ids.
+            return unchecked((ulong)Interlocked.Add(ref _correlationCounter, 2));
         }
 
-        private Task<ArraySegment<byte>> WaitForRequestAsync(Guid taskCompletionId, TaskCompletionSource<ArraySegment<byte>> source, TimeSpan timeout, CancellationToken cancellationToken)
+        private bool IsLocalCorrelationId(ulong correlationId) => (correlationId & 1UL) == _localCorrelationParity;
+
+        private Task<NetXMessage> WaitForRequestAsync(ulong correlationId, TaskCompletionSource<NetXMessage> source, TimeSpan timeout, CancellationToken cancellationToken)
         {
             // Determine which timeout to use
             var effectiveTimeout = timeout;
@@ -321,14 +221,12 @@ namespace NetX
                 else
                     source.TrySetException(new OperationCanceledException(cancellationToken));
 
-                if (_completions.TryRemove(taskCompletionId, out var __))
-                {
-                    _timedOutCompletions.TryAdd(taskCompletionId, 0);
-                }
-                else
-                {
-                    _logger?.LogError("{svrName}: Cannot remove task completion for MessageId = {msgId} after timeout", _appName, taskCompletionId);
-                }
+                // Just drop our own tracking entry. A reply that arrives after this point falls into
+                // the "local-parity id with no matching completion" case in ReadPipeAsync and is
+                // dropped there as stale — no separate tombstone set needed to make that safe (see
+                // _localCorrelationParity remarks).
+                if (!_completions.TryRemove(correlationId, out _))
+                    _logger?.LogError("{svrName}: Cannot remove task completion for CorrelationId = {corrId} after timeout", _appName, correlationId);
 
                 // Only disconnect on actual timeout, not on regular cancellation or connection close
                 if (_options.DisconnectOnTimeout && effectiveTimeout != Timeout.InfiniteTimeSpan
@@ -347,11 +245,10 @@ namespace NetX
             return source.Task;
         }
 
-        public async ValueTask ReplyAsync(Guid messageId, ArraySegment<byte> buffer, CancellationToken cancellationToken = default)
+        public async ValueTask ReplyAsync(ulong correlationId, ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
         {
-            if (!_options.Duplex)
-                throw new NotSupportedException(
-                    $"Cannot use ReplyAsync with {nameof(_options.Duplex)} option disabled");
+            if (correlationId == PUSH_CORRELATION_ID)
+                throw new ArgumentOutOfRangeException(nameof(correlationId), "Cannot reply with the push correlation id (0)");
 
             if (cancellationToken.IsCancellationRequested)
                 return;
@@ -359,17 +256,7 @@ namespace NetX
             await _semaphore.WaitAsync(cancellationToken);
             try
             {
-                var size = buffer.Count + sizeof(int) + GUID_LEN;
-                BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
-                _sendPipe.Writer.Advance(sizeof(int));
-
-                messageId.TryWriteBytes(_sendPipe.Writer.GetSpan(GUID_LEN));
-                _sendPipe.Writer.Advance(GUID_LEN);
-
-                var memory = _sendPipe.Writer.GetMemory(buffer.Count);
-                buffer.AsMemory().CopyTo(memory);
-
-                _sendPipe.Writer.Advance(buffer.Count);
+                WriteFrame(correlationId, buffer.Span);
 
                 if (!_connCancellationTokenSource.IsCancellationRequested)
                     await _sendPipe.Writer.FlushAsync(_connCancellationTokenSource.Token);
@@ -380,61 +267,24 @@ namespace NetX
             }
         }
 
-        public async ValueTask ReplyAsync(Guid messageId, Stream stream, CancellationToken cancellationToken = default)
+        /// <summary>
+        /// Writes [i32 totalLength][u64 correlationId][payload] into the send pipe.
+        /// Caller must hold <see cref="_semaphore"/>.
+        /// </summary>
+        private void WriteFrame(ulong correlationId, ReadOnlySpan<byte> payload)
         {
-            if (!_options.Duplex)
-                throw new NotSupportedException(
-                    $"Cannot use ReplyAsync with {nameof(_options.Duplex)} option disabled");
+            var totalLength = HEADER_LEN + payload.Length;
 
-            if (cancellationToken.IsCancellationRequested)
-                return;
+            var header = _sendPipe.Writer.GetSpan(HEADER_LEN);
+            BinaryPrimitives.WriteInt32LittleEndian(header, totalLength);
+            BinaryPrimitives.WriteUInt64LittleEndian(header[LENGTH_LEN..], correlationId);
+            _sendPipe.Writer.Advance(HEADER_LEN);
 
-            await _semaphore.WaitAsync(cancellationToken);
-            try
+            if (payload.Length > 0)
             {
-                stream.Position = 0;
-                var streamLength = (int)stream.Length;
-
-                // Read stream into temporary buffer BEFORE writing to the pipe.
-                var rentedBuffer = ArrayPool<byte>.Shared.Rent(streamLength);
-                int bytesRead;
-                try
-                {
-                    bytesRead = await stream.ReadAsync(rentedBuffer.AsMemory(0, streamLength), cancellationToken);
-                }
-                catch
-                {
-                    ArrayPool<byte>.Shared.Return(rentedBuffer);
-                    throw;
-                }
-
-                try
-                {
-                    if (bytesRead != 0)
-                    {
-                        var size = bytesRead + sizeof(int) + GUID_LEN;
-                        BitConverter.TryWriteBytes(_sendPipe.Writer.GetSpan(sizeof(int)), size);
-                        _sendPipe.Writer.Advance(sizeof(int));
-
-                        messageId.TryWriteBytes(_sendPipe.Writer.GetSpan(GUID_LEN));
-                        _sendPipe.Writer.Advance(GUID_LEN);
-
-                        var memory = _sendPipe.Writer.GetMemory(bytesRead);
-                        rentedBuffer.AsMemory(0, bytesRead).CopyTo(memory);
-                        _sendPipe.Writer.Advance(bytesRead);
-
-                        if (!_connCancellationTokenSource.IsCancellationRequested)
-                            await _sendPipe.Writer.FlushAsync(_connCancellationTokenSource.Token);
-                    }
-                }
-                finally
-                {
-                    ArrayPool<byte>.Shared.Return(rentedBuffer);
-                }
-            }
-            finally
-            {
-                _semaphore.Release();
+                var memory = _sendPipe.Writer.GetSpan(payload.Length);
+                payload.CopyTo(memory);
+                _sendPipe.Writer.Advance(payload.Length);
             }
         }
 
@@ -455,12 +305,9 @@ namespace NetX
 
             try
             {
-                using var recvBuffer = MemoryOwner<byte>.Allocate(_options.RecvBufferSize);
-                using var sendBuffer = MemoryOwner<byte>.Allocate(_options.SendBufferSize);
-
                 var writing = FillPipeAsync(_connCancellationTokenSource.Token);
-                var reading = ReadPipeAsync(recvBuffer, _connCancellationTokenSource.Token);
-                var sending = SendPipeAsync(sendBuffer, _connCancellationTokenSource.Token);
+                var reading = ReadPipeAsync(_connCancellationTokenSource.Token);
+                var sending = SendPipeAsync(_connCancellationTokenSource.Token);
 
                 // Wait for receive-side loops to complete first
                 await Task.WhenAll(writing, reading);
@@ -490,8 +337,6 @@ namespace NetX
                 // Without this, every session that ever connected keeps a callback registered
                 // on the server's CancellationToken, leaking session objects until server shutdown.
                 listenRegistration.Dispose();
-                // Free timed-out completions tracking memory
-                _timedOutCompletions.Clear();
                 // Note: _connCancellationTokenSource and _semaphore are NOT disposed here
                 // because fire-and-forget handlers may still reference them after ProcessConnection exits.
                 // They are lightweight and GC-safe.
@@ -589,7 +434,7 @@ namespace NetX
             }
         }
 
-        private async Task ReadPipeAsync(MemoryOwner<byte> recvBuffer, CancellationToken cancellationToken)
+        private async Task ReadPipeAsync(CancellationToken cancellationToken)
         {
             try
             {
@@ -598,35 +443,41 @@ namespace NetX
                     ReadResult result = await _receivePipe.Reader.ReadAsync(cancellationToken);
                     ReadOnlySequence<byte> buffer = result.Buffer;
 
-                    while (!cancellationToken.IsCancellationRequested && TryGetReceivedMessage(ref buffer, recvBuffer, out var message))
+                    while (!cancellationToken.IsCancellationRequested && TryGetReceivedMessage(ref buffer, out var message))
                     {
-                        if (_options.Duplex && message.Id != Guid.Empty && _completions.TryRemove(message.Id, out var completion))
+                        if (message.CorrelationId != PUSH_CORRELATION_ID && IsLocalCorrelationId(message.CorrelationId))
                         {
-                            if (!MemoryMarshal.TryGetArray(message.Buffer, out var arraySegment))
+                            // This id is in our own namespace — it can only be a reply to one of OUR
+                            // outstanding requests, or a stale reply for one that already timed out /
+                            // was cancelled (never a genuine peer-initiated request; see
+                            // _localCorrelationParity remarks).
+                            if (_completions.TryRemove(message.CorrelationId, out var completion))
                             {
-                                _logger?.LogError("{appName}: Failed to get array segment from duplex message. MessageId = {msgId}", _appName, message.Id);
-                                message.Dispose();
-                                continue;
+                                // Ownership of the underlying pooled buffer transfers to the request's
+                                // awaiter here — it is intentionally NOT disposed on this path (that would
+                                // return the array to the pool while the caller still holds a reference to it).
+                                if (!completion.TrySetResult(message))
+                                {
+                                    _logger?.LogError("{appName}: Failed to set duplex completion result. CorrelationId = {corrId}", _appName, message.CorrelationId);
+                                    message.Dispose();
+                                }
                             }
-
-                            if (!completion.TrySetResult(arraySegment))
+                            else
                             {
-                                _logger?.LogError("{appName}: Failed to set duplex completion result. MessageId = {msgId}", _appName, message.Id);
+                                // Stale reply — completion already consumed/removed by a timeout or
+                                // cancellation. Discard silently instead of dispatching to the handler
+                                // as if it were a regular/peer-initiated message.
                                 message.Dispose();
                             }
 
                             continue;
                         }
 
-                        // Bug 7: Stale duplex reply — completion was already consumed by timeout.
-                        // Discard silently instead of dispatching to handler as regular message.
-                        if (_options.Duplex && message.Id != Guid.Empty
-                            && _timedOutCompletions.TryRemove(message.Id, out _))
-                        {
-                            message.Dispose();
-                            continue;
-                        }
-
+                        // Either a push (correlationId == 0) or a genuine request from the peer's own
+                        // namespace — dispatch to the handler. Ownership of the message transfers to
+                        // the handler, which owns disposing it (it may hand it off to background work
+                        // that outlives this call, so we must not dispose here — see NetXMessage).
+                        //
                         // Bug 6: Isolate handler exceptions per-message.
                         // A single handler failure should not kill the entire IPC connection.
                         try
@@ -644,6 +495,9 @@ namespace NetX
                     }
 
                     if (result.IsCanceled || result.IsCompleted)
+                        break;
+
+                    if (_connCancellationTokenSource.IsCancellationRequested)
                         break;
 
                     _receivePipe.Reader.AdvanceTo(buffer.Start, buffer.End);
@@ -664,60 +518,70 @@ namespace NetX
             }
         }
 
-        private bool TryGetReceivedMessage(
-            ref ReadOnlySequence<byte> buffer,
-            MemoryOwner<byte> recvBuffer,
-            out NetXMessage netXMessage)
+        /// <summary>
+        /// Parses one frame out of the accumulated receive buffer, if a full frame is available.
+        /// The Pipe itself is the accumulation buffer — a frame that spans multiple socket reads
+        /// simply waits here (returns false) until FillPipeAsync has delivered enough bytes; there is
+        /// no dependency on RecvBufferSize. Frames whose payload would exceed <see cref="NetXConnectionOptions.MaxFrameBytes"/>
+        /// are treated as a protocol violation and the connection is dropped.
+        /// The payload is copied exactly once: straight from the pipe's <see cref="ReadOnlySequence{T}"/>
+        /// into a freshly rented <see cref="MemoryOwner{T}"/> that is handed to the caller (ownership
+        /// transfers with the returned <see cref="NetXMessage"/> — the caller must Dispose it).
+        /// </summary>
+        private bool TryGetReceivedMessage(ref ReadOnlySequence<byte> buffer, out NetXMessage netXMessage)
         {
             netXMessage = default;
 
-            const int DUPLEX_HEADER_SIZE = sizeof(int) + GUID_LEN;
-
-            if (buffer.IsEmpty || (_options.Duplex && buffer.Length < DUPLEX_HEADER_SIZE))
+            if (buffer.Length < HEADER_LEN)
                 return false;
 
-            var headerOffset = _options.Duplex ? DUPLEX_HEADER_SIZE : 0;
+            Span<byte> header = stackalloc byte[HEADER_LEN];
+            buffer.Slice(0, HEADER_LEN).CopyTo(header);
 
-            var minRecvSize = Math.Min(_options.RecvBufferSize, buffer.Length);
-            buffer.Slice(0, _options.Duplex ? headerOffset : minRecvSize).CopyTo(recvBuffer.Span);
+            var totalLength = BinaryPrimitives.ReadInt32LittleEndian(header);
+            var correlationId = BinaryPrimitives.ReadUInt64LittleEndian(header[LENGTH_LEN..]);
 
-            var size = _options.Duplex ? BitConverter.ToInt32(recvBuffer.Span) : GetReceiveMessageSize(recvBuffer.Memory[..(int)minRecvSize]);
-            var messageId = _options.Duplex ? new Guid(recvBuffer.Span.Slice(4, 16)) : Guid.Empty;
-
-            if (size <= 0 || (_options.Duplex && size < headerOffset))
+            if (totalLength < HEADER_LEN)
             {
                 _logger?.LogError(
-                    "{appName}: Invalid frame size {size}, expected >= {headerOffset}. Disconnecting.",
-                    _appName, size, headerOffset);
+                    "{appName}: Invalid frame length {size}, expected >= {headerLen}. Disconnecting.",
+                    _appName, totalLength, HEADER_LEN);
                 _disconnectReason = DisconnectReason.CLOSE;
                 _connCancellationTokenSource.Cancel();
                 return false;
             }
 
-            if (size > _options.RecvBufferSize)
-                throw new Exception(
-                    $"Recv Buffer is too small. RecvBuffLen = {_options.RecvBufferSize} ReceivedLen = {size}");
+            var payloadLength = totalLength - HEADER_LEN;
 
-            if (size > buffer.Length)
+            if (payloadLength > _options.MaxFrameBytes)
+            {
+                _logger?.LogError(
+                    "{appName}: Frame payload {payloadLength} exceeds MaxFrameBytes {maxFrameBytes}. Disconnecting.",
+                    _appName, payloadLength, _options.MaxFrameBytes);
+                _disconnectReason = DisconnectReason.CLOSE;
+                _connCancellationTokenSource.Cancel();
+                return false;
+            }
+
+            if (totalLength > buffer.Length)
+                // Frame not fully received yet — wait for more data to accumulate in the pipe.
                 return false;
 
-            buffer.Slice(headerOffset, size - headerOffset).CopyTo(recvBuffer.Span);
+            var payloadOwner = MemoryOwner<byte>.Allocate(payloadLength);
+            if (payloadLength > 0)
+                buffer.Slice(HEADER_LEN, payloadLength).CopyTo(payloadOwner.Span);
 
-            var messageBuffer = recvBuffer.Memory[..(size - headerOffset)];
-            ProcessReceivedBuffer(messageBuffer);
+            ProcessReceivedBuffer(payloadOwner.Memory);
 
-            var next = buffer.GetPosition(size);
+            var next = buffer.GetPosition(totalLength);
             buffer = buffer.Slice(next);
 
-            var messageMemory = MemoryOwner<byte>.Allocate(messageBuffer.Length);
-            messageBuffer.CopyTo(messageMemory.Memory);
-
-            netXMessage = new NetXMessage(messageId, messageMemory);
+            netXMessage = new NetXMessage(correlationId, payloadOwner);
 
             return true;
         }
 
-        private async Task SendPipeAsync(MemoryOwner<byte> sendBuffer, CancellationToken cancellationToken)
+        private async Task SendPipeAsync(CancellationToken cancellationToken)
         {
             try
             {
@@ -729,19 +593,21 @@ namespace NetX
                     if (result.IsCanceled || result.IsCompleted)
                         break;
 
-                    while (!cancellationToken.IsCancellationRequested && TryGetSendMessage(ref buffer, sendBuffer, out var sendBuff))
+                    while (!cancellationToken.IsCancellationRequested && TryGetSendFrame(ref buffer, out var frame))
                     {
                         if (_socket.Connected)
                         {
-                            try
+                            // Stream the frame straight out of the pipe's own (possibly multi-segment)
+                            // buffer — no intermediate scratch buffer, so a frame's validity/size no
+                            // longer depends on NetXConnectionOptions.SendBufferSize (that option only
+                            // sizes the OS-level socket send buffer now).
+                            foreach (var segment in frame)
                             {
-                                using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                                sendCts.CancelAfter(_options.SocketTimeout > 0 ? _options.SocketTimeout : 3000);
-                                await _socket.SendAsync(sendBuff, SocketFlags.None, sendCts.Token);
-                            }
-                            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                            {
-                                throw new SocketException((int)SocketError.TimedOut);
+                                if (segment.IsEmpty)
+                                    continue;
+
+                                ProcessSendBuffer(in segment);
+                                await SendSegmentAsync(segment, cancellationToken);
                             }
                         }
                     }
@@ -770,42 +636,62 @@ namespace NetX
             }
         }
 
-        private bool TryGetSendMessage(
-            ref ReadOnlySequence<byte> buffer,
-            MemoryOwner<byte> sendBuffer,
-            out ReadOnlyMemory<byte> sendBuff)
+        /// <summary>
+        /// Sends one contiguous pipe segment to completion. <see cref="Socket.SendAsync(Memory{byte}, SocketFlags, CancellationToken)"/>
+        /// is free to write fewer bytes than requested (a partial send) — advance the offset by
+        /// exactly what the OS accepted and keep sending the remainder, instead of assuming the whole
+        /// segment always goes out in a single call.
+        /// </summary>
+        private async Task SendSegmentAsync(ReadOnlyMemory<byte> segment, CancellationToken cancellationToken)
         {
-            sendBuff = default;
+            var offset = 0;
+            while (offset < segment.Length)
+            {
+                using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                sendCts.CancelAfter(_options.SocketTimeout > 0 ? _options.SocketTimeout : 3000);
 
-            var offset = _options.Duplex ? 0 : sizeof(int);
+                int sent;
+                try
+                {
+                    sent = await _socket.SendAsync(segment[offset..], SocketFlags.None, sendCts.Token);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new SocketException((int)SocketError.TimedOut);
+                }
 
-            if (buffer.IsEmpty || buffer.Length < sizeof(int))
-                return false;
+                if (sent <= 0)
+                    throw new SocketException((int)SocketError.ConnectionReset);
 
-            buffer.Slice(0, sizeof(int)).CopyTo(sendBuffer.Span);
-            var size = BitConverter.ToInt32(sendBuffer.Span[..sizeof(int)]);
-
-            if (size > _options.SendBufferSize)
-                throw new Exception($"Send Buffer is too small. SendBuffLen = {_options.SendBufferSize} SendLen = {size}");
-
-            if (size > buffer.Length)
-                return false;
-
-            buffer.Slice(offset, size).CopyTo(sendBuffer.Span);
-
-            sendBuff = sendBuffer.Memory[..size];
-
-            ProcessSendBuffer(in sendBuff);
-
-            var next = buffer.GetPosition(size + offset);
-            buffer = buffer.Slice(next);
-
-            return true;
+                offset += sent;
+            }
         }
 
-        protected virtual int GetReceiveMessageSize(in ReadOnlyMemory<byte> buffer)
+        /// <summary>
+        /// Slices exactly one complete frame off the front of the accumulated send buffer, if one is
+        /// fully available. Does not copy — the returned <see cref="ReadOnlySequence{T}"/> is a view
+        /// over the pipe's own buffered segments.
+        /// </summary>
+        private bool TryGetSendFrame(ref ReadOnlySequence<byte> buffer, out ReadOnlySequence<byte> frame)
         {
-            return 0;
+            frame = default;
+
+            if (buffer.Length < LENGTH_LEN)
+                return false;
+
+            Span<byte> lengthSpan = stackalloc byte[LENGTH_LEN];
+            buffer.Slice(0, LENGTH_LEN).CopyTo(lengthSpan);
+            var size = BinaryPrimitives.ReadInt32LittleEndian(lengthSpan);
+
+            if (size > buffer.Length)
+                // Frame not fully buffered yet — WriteFrame always writes a complete frame while
+                // holding _semaphore, so this just means the writer's FlushAsync hasn't caught up yet.
+                return false;
+
+            frame = buffer.Slice(0, size);
+            buffer = buffer.Slice(size);
+
+            return true;
         }
 
         protected virtual void ProcessReceivedBuffer(in ReadOnlyMemory<byte> buffer)

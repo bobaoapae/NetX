@@ -17,9 +17,15 @@ namespace ServerClientSample
 
         public async ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
         {
-            Log.Information("Received message from session {sessionId} with length {messageLength}", session.Id, message.Buffer.Length);
-            Log.Information("Session received message");
-            Log.Information("Session returned to function after delay");
+            // Ownership contract: this handler owns `message` and must dispose it once done
+            // reading its Buffer.
+            using (message)
+            {
+                Log.Information("Received message from session {sessionId} with length {messageLength}", session.Id, message.Buffer.Length);
+                Log.Information("Session received message");
+                Log.Information("Session returned to function after delay");
+            }
+
             var sendBytes = "teste12345678910"u8.ToArray();
             Log.Information("Sending data length {dataLength} with data {data}", sendBytes.Length, Convert.ToHexString(sendBytes));
             await session.SendAsync(sendBytes);
@@ -29,11 +35,6 @@ namespace ServerClientSample
         {
             Log.Information("Session {sessionId} disconnected. Reason: {reason}", sessionId, reason);
             return ValueTask.CompletedTask;
-        }
-
-        public int GetReceiveMessageSize(INetXSession session, in ReadOnlyMemory<byte> buffer)
-        {
-            return buffer.Length;
         }
 
         public void ProcessReceivedBuffer(INetXSession session, in ReadOnlyMemory<byte> buffer)

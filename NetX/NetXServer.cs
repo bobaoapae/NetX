@@ -19,18 +19,29 @@ namespace NetX
         private readonly NetXServerOptions _options;
         private readonly ConcurrentDictionary<Guid, INetXSession> _sessions;
 
+        // Independent of whatever CancellationToken a caller passes to Listen(): Stop() must fully
+        // shut the listener down (close the socket so the port is free to rebind) even when Listen()
+        // was called with the default token, or when Stop() is invoked directly instead of through
+        // cancellation. Cancelling the caller-supplied token still routes here via the registration
+        // in Listen(), so both shutdown paths converge on the same, single-fire logic.
+        private readonly CancellationTokenSource _shutdownCts = new();
+        private int _stopped;
+
         internal NetXServer(NetXServerOptions options, ILoggerFactory loggerFactory = null, string serverName = null)
         {
             _logger = loggerFactory?.CreateLogger<NetXServer>();
             _serverName = serverName ?? nameof(NetXServer);
 
-            _socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+            // IPv6 dual-mode listening socket: accepts both native IPv6 clients and IPv4 clients
+            // (delivered as IPv4-mapped IPv6 addresses) on a single socket/port.
+            _socket = new Socket(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp)
             {
                 NoDelay = options.NoDelay,
-                LingerState = new LingerOption(true, 5)
+                LingerState = new LingerOption(true, 5),
+                DualMode = true
             };
 
-            _socket.Bind(options.EndPoint);
+            _socket.Bind(ToDualModeBindEndPoint(options.EndPoint));
             _socket.ReceiveTimeout = options.SocketTimeout;
             _socket.SendTimeout = options.SocketTimeout;
             _socket.ReceiveBufferSize = options.RecvBufferSize;
@@ -44,6 +55,19 @@ namespace NetX
             _options = options;
             _sessions = new ConcurrentDictionary<Guid, INetXSession>();
         }
+
+        private static IPEndPoint ToDualModeBindEndPoint(IPEndPoint endPoint)
+        {
+            if (endPoint.AddressFamily == AddressFamily.InterNetworkV6)
+                return endPoint;
+
+            return endPoint.Address.Equals(IPAddress.Any)
+                ? new IPEndPoint(IPAddress.IPv6Any, endPoint.Port)
+                : new IPEndPoint(endPoint.Address.MapToIPv6(), endPoint.Port);
+        }
+
+        private static IPAddress NormalizeRemoteAddress(IPAddress address)
+            => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
 
         public bool TryGetSession(Guid sessionId, out INetXSession session)
         {
@@ -61,11 +85,45 @@ namespace NetX
 
             _logger?.LogInformation("{svrName}: TCP Server listening on {ip}:{port}", _serverName, _options.EndPoint.Address, _options.EndPoint.Port);
 
+            // Cancelling the caller-supplied token must fully stop the server (close the listening
+            // socket, disconnect sessions), not merely stop the accept loop -- otherwise the port
+            // stays bound after the caller believes the server is down. Routing through Stop() keeps
+            // this the single place that does that, whether triggered by this token or by an explicit
+            // Stop() call.
+            cancellationToken.Register(Stop);
+
+            var acceptToken = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdownCts.Token).Token;
+
             _ = Task.Factory.StartNew(
-                () => StartAcceptAsync(cancellationToken),
+                () => StartAcceptAsync(acceptToken),
                 default,
                 TaskCreationOptions.LongRunning,
                 TaskScheduler.Default);
+        }
+
+        /// <summary>
+        /// Stops accepting new connections, closes the listening socket and disconnects every
+        /// currently connected session. Safe to call more than once (only the first call has any
+        /// effect) and safe to call whether or not <see cref="Listen"/>'s own token was ever cancelled.
+        /// </summary>
+        public void Stop()
+        {
+            if (Interlocked.Exchange(ref _stopped, 1) != 0)
+                return;
+
+            _shutdownCts.Cancel();
+
+            try
+            {
+                _socket.Close();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogDebug(ex, "{svrName}: Exception while closing the listening socket during Stop", _serverName);
+            }
+
+            foreach (var session in _sessions.Values)
+                session.Disconnect();
         }
 
         private async Task StartAcceptAsync(CancellationToken listenCancellationToken)
@@ -89,6 +147,12 @@ namespace NetX
                     }
                     catch (OperationCanceledException)
                     {
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Stop() closed the listening socket while an accept was pending -- expected on
+                        // shutdown, not an error. _shutdownCts is already cancelled by the time Stop()
+                        // reaches here, so the loop condition below ends the loop on the next check.
                     }
                     catch (SocketException e)
                     {
@@ -117,13 +181,13 @@ namespace NetX
         {
             try
             {
-                var remoteAddress = ipEndPoint.Address.MapToIPv4();
+                var remoteAddress = NormalizeRemoteAddress(ipEndPoint.Address);
                 if (_options.UseProxy)
                 {
                     await using var stream = new NetworkStream(sessionSocket);
                     var proxyprotocol = new ProxyProtocol(stream, sessionSocket.RemoteEndPoint as IPEndPoint);
                     var realRemoteEndpoint = await proxyprotocol.GetRemoteEndpoint();
-                    remoteAddress = realRemoteEndpoint.Address.MapToIPv4();
+                    remoteAddress = NormalizeRemoteAddress(realRemoteEndpoint.Address);
                 }
 
                 var session = new NetXSession(sessionSocket, remoteAddress, _options, _serverName, _logger);
@@ -133,7 +197,13 @@ namespace NetX
                     return;
                 }
 
-                _ = DispatchOnSessionConnect(session, cancellationToken);
+                // Still started without waiting for it, so a connect callback that itself calls back
+                // into the connection (e.g. a duplex request that only completes once the pump loop
+                // below is actually draining the send pipe) does not deadlock against its own connect.
+                // What must never happen is the disconnect callback overtaking a still-in-flight connect
+                // callback for the same session -- that inversion is fixed below, not by serializing
+                // this start.
+                var connectDispatch = DispatchOnSessionConnect(session, cancellationToken);
 
                 try
                 {
@@ -147,6 +217,11 @@ namespace NetX
                 {
                     if (_sessions.TryRemove(session.Id, out var netXSession))
                     {
+                        // Wait for the connect callback to fully finish (success or failure -- it never
+                        // throws past DispatchOnSessionConnect's own try/catch) before ever starting the
+                        // disconnect callback for this session, so a caller always observes them in
+                        // connect-then-disconnect order, never inverted or interleaved.
+                        await connectDispatch;
                         await _options.Processor.OnSessionDisconnectAsync(session.Id, session.DisconnectReason);
                     }
                 }

@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 
 namespace NetX.Options
 {
@@ -8,9 +8,8 @@ namespace NetX.Options
         public bool NoDelay { get; }
         public int RecvBufferSize { get; }
         public int SendBufferSize { get; }
-        public bool Duplex { get; }
         public int DuplexTimeout { get; }
-        public bool CopyBuffer { get; }
+        public int MaxFrameBytes { get; }
         public int SocketTimeout { get; }
         public bool ReuseSocket { get; }
         public bool DisconnectOnTimeout { get; }
@@ -20,9 +19,8 @@ namespace NetX.Options
             bool noDelay,
             int recvBufferSize,
             int sendBufferSize,
-            bool duplex,
             int duplexTimeout,
-            bool copyBuffer,
+            int maxFrameBytes,
             int socketTimeout,
             bool disconnectOnTimeout,
             bool reuseSocket)
@@ -31,9 +29,8 @@ namespace NetX.Options
             NoDelay = noDelay;
             RecvBufferSize = recvBufferSize;
             SendBufferSize = sendBufferSize;
-            Duplex = duplex;
             DuplexTimeout = duplexTimeout;
-            CopyBuffer = copyBuffer;
+            MaxFrameBytes = maxFrameBytes;
             SocketTimeout = socketTimeout;
             DisconnectOnTimeout = disconnectOnTimeout;
             ReuseSocket = reuseSocket;

@@ -14,8 +14,8 @@ namespace NetX
         public IPAddress RemoteAddress { get; }
         public DateTime ConnectionTime { get; }
 
-        public NetXSession(Socket socket, IPAddress remoteAddress, NetXServerOptions options, string serverName, ILogger logger) 
-            : base(socket, options, serverName, logger, false)
+        public NetXSession(Socket socket, IPAddress remoteAddress, NetXServerOptions options, string serverName, ILogger logger)
+            : base(socket, options, serverName, logger, isClientRole: false, reuseSocket: false)
         {
             Id = Guid.NewGuid();
             RemoteAddress = remoteAddress;
@@ -24,9 +24,6 @@ namespace NetX
 
         protected override ValueTask OnReceivedMessageAsync(NetXMessage message, CancellationToken cancellationToken)
             => ((NetXServerOptions)_options).Processor.OnReceivedMessageAsync(this, message, cancellationToken);
-
-        protected override int GetReceiveMessageSize(in ReadOnlyMemory<byte> buffer)
-            => ((NetXServerOptions)_options).Processor.GetReceiveMessageSize(this, in buffer);
 
         protected override void ProcessReceivedBuffer(in ReadOnlyMemory<byte> buffer)
         {

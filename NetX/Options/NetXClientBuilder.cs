@@ -41,9 +41,8 @@ namespace NetX.Options
                 _noDelay,
                 _recvBufferSize,
                 _sendBufferSize,
-                _duplex,
                 _duplexTimeout,
-                _copyBuffer,
+                _maxFrameBytes,
                 _socketTimeout,
                 _disconnectOnTimeout,
                 _reuseSocket);

@@ -52,14 +52,13 @@ namespace NetX.Options
         public override INetXServer Build()
         {
             var options = new NetXServerOptions(
-                _processor, 
-                _endpoint, 
-                _noDelay, 
-                _recvBufferSize, 
-                _sendBufferSize, 
-                _duplex,
+                _processor,
+                _endpoint,
+                _noDelay,
+                _recvBufferSize,
+                _sendBufferSize,
                 _duplexTimeout,
-                _copyBuffer,
+                _maxFrameBytes,
                 _useProxy,
                 _backlog,
                 _socketTimeout,

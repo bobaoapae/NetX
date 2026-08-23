@@ -31,12 +31,11 @@ namespace ServerClientSample
             _server = NetXServerBuilder.Create(loggerFactory, "SampleServer")
                 .Processor<SampleServerProcessor>()
                 .EndPoint("0.0.0.0", 48101)
-                .Duplex(false)
-                .CopyBuffer(true)
                 .NoDelay(true)
                 .SocketTimeout(1000)
                 .ReceiveBufferSize(20000020)
                 .SendBufferSize(20000020)
+                .MaxFrameBytes(20000020)
                 .Build();
 
             _server.Listen(serverTokenSrc.Token);
@@ -44,8 +43,6 @@ namespace ServerClientSample
             /*_client = NetXClientBuilder.Create(loggerFactory, "SampleClient")
                 .Processor<SampleClientProcessor>()
                 .EndPoint("127.0.0.1", 38101)
-                .Duplex(false)
-                .CopyBuffer(true)
                 .NoDelay(true)
                 .SocketTimeout(1000)
                 .ReceiveBufferSize(20000020)

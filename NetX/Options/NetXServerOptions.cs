@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 
 namespace NetX.Options
 {
@@ -10,24 +10,22 @@ namespace NetX.Options
 
         public NetXServerOptions(
             INetXServerProcessor processor,
-            IPEndPoint endPoint, 
-            bool noDelay, 
-            int recvBufferSize, 
-            int sendBufferSize, 
-            bool duplex,
+            IPEndPoint endPoint,
+            bool noDelay,
+            int recvBufferSize,
+            int sendBufferSize,
             int duplexTimeout,
-            bool copyBuffer,
+            int maxFrameBytes,
             bool useProxy,
             int backLog,
             int socketTimeout,
             bool disconnectOnTimeout) : base(
-                endPoint, 
-                noDelay, 
-                recvBufferSize, 
-                sendBufferSize, 
-                duplex,
+                endPoint,
+                noDelay,
+                recvBufferSize,
+                sendBufferSize,
                 duplexTimeout,
-                copyBuffer,
+                maxFrameBytes,
                 socketTimeout,
                 disconnectOnTimeout,
                 false)
