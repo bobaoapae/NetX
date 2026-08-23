@@ -1,6 +1,7 @@
 using System;
 using System.Net;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using NetX.AutoServiceGenerator.Definitions;
 
@@ -38,6 +39,39 @@ namespace NetX.AutoService.Internal
         private readonly AutoServiceCallContextFactory _outgoingContextFactory = new();
         private readonly int _maxFrameBytes;
 
+        // NetX's read loop (NetXConnection.ReadPipeAsync) awaits OnReceivedMessageAsync before it reads
+        // the next frame. Two things are both true at once here:
+        //  1. A dispatcher invoked from HandleInboundAsync may call back into this same peer (a reverse
+        //     operation over the same connection) before it finishes handling the forward call -- that
+        //     reverse call's reply can only ever arrive on this connection's read loop, so
+        //     OnReceivedMessageAsync must return before HandleInboundAsync completes, or the nested
+        //     round trip deadlocks.
+        //  2. Frames must still be handled in the order NetX handed them to this peer -- letting each
+        //     one dispatch fully concurrently (fire-and-forget per message) can run frame N and frame
+        //     N+1 side by side, and two ordered calls (e.g. authenticate then a follow-up op) can
+        //     execute or complete out of order.
+        // This queue is the resolution: EnqueueInbound hands the message off and returns immediately
+        // (satisfying #1), while a single background worker drains it one message at a time via
+        // HandleInboundAsync (satisfying #2). Reply frames never reach here -- NetX matches those
+        // against pending RequestAsync completions before a message is ever handed to a processor (see
+        // the Response-frame no-op inside HandleInboundAsync) -- so a reverse call's reply is free to
+        // land on the read loop and complete while this queue is still draining an earlier forward call.
+        private readonly Channel<PendingInbound> _inboundQueue = Channel.CreateUnbounded<PendingInbound>(
+            new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+        private readonly Task _inboundWorker;
+
+        private readonly struct PendingInbound
+        {
+            internal PendingInbound(NetXMessage message, CancellationToken cancellationToken)
+            {
+                Message = message;
+                CancellationToken = cancellationToken;
+            }
+
+            internal NetXMessage Message { get; }
+            internal CancellationToken CancellationToken { get; }
+        }
+
         internal AutoServicePeerSession(
             INetXConnection connection,
             Guid id,
@@ -59,6 +93,7 @@ namespace NetX.AutoService.Internal
             // peer's own outbound/inbound methods.
             var authenticator = authenticatorFactory?.Invoke(this) ?? AutoServiceNoAuthAuthenticator.Instance;
             _dispatcher = new AutoServiceAuthenticatingDispatcher(router, authenticator);
+            _inboundWorker = Task.Run(ProcessInboundQueueAsync);
         }
 
         public Guid Id { get; }
@@ -170,6 +205,50 @@ namespace NetX.AutoService.Internal
         {
             var context = _outgoingContextFactory.Create(serviceId, schemaVersion, operationId, contractFingerprint, payload);
             return new AutoServiceRequest(context, payload);
+        }
+
+        /// <summary>
+        /// Hands <paramref name="message"/> off to this peer's serial inbound queue and returns
+        /// immediately -- called synchronously from the owning processor's OnReceivedMessageAsync so the
+        /// NetX read loop can move straight on to the next frame (see the queue's own doc comment above
+        /// for why that matters). Takes ownership of <paramref name="message"/>: it is either queued (and
+        /// later disposed by <see cref="HandleInboundAsync"/>) or, if the queue has already been
+        /// completed (this peer disconnected), disposed here.
+        /// </summary>
+        internal void EnqueueInbound(NetXMessage message, CancellationToken cancellationToken)
+        {
+            if (!_inboundQueue.Writer.TryWrite(new PendingInbound(message, cancellationToken)))
+                message.Dispose();
+        }
+
+        /// <summary>
+        /// Stops accepting further inbound frames and lets the worker drain whatever is already queued.
+        /// Called once by the owning processor when its NetX session/connection disconnects.
+        /// </summary>
+        internal void CompleteInbound() => _inboundQueue.Writer.TryComplete();
+
+        private async Task ProcessInboundQueueAsync()
+        {
+            await foreach (var pending in _inboundQueue.Reader.ReadAllAsync().ConfigureAwait(false))
+            {
+                try
+                {
+                    await HandleInboundAsync(pending.Message, pending.CancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Shutdown/cancellation of the owning connection -- nothing left to reply to.
+                }
+                catch (Exception)
+                {
+                    // HandleInboundAsync already turns dispatcher/service failures into a structured
+                    // AutoServiceResponse and replies with it -- reaching here means the reply/protocol-
+                    // error write itself (or NetX's own send path underneath it) failed unexpectedly.
+                    // There is no reply channel left to trust, so tear the connection down rather than
+                    // leave a caller hanging on a request this connection can no longer honor.
+                    Disconnect();
+                }
+            }
         }
 
         /// <summary>

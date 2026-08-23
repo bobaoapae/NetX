@@ -44,21 +44,26 @@ namespace NetX.AutoService.Internal
                 await _onConnected(_peer, cancellationToken).ConfigureAwait(false);
         }
 
-        public async ValueTask OnReceivedMessageAsync(INetXConnection client, NetXMessage message, CancellationToken cancellationToken)
+        public ValueTask OnReceivedMessageAsync(INetXConnection client, NetXMessage message, CancellationToken cancellationToken)
         {
+            // NetXConnection.ReadPipeAsync awaits this method before it reads the next frame off the
+            // wire. EnqueueInbound hands the message off to this peer's own serial inbound queue and
+            // returns immediately, so this read loop can move straight on -- including to the reply
+            // frame of a reverse call a dispatcher makes back into this same peer before it finishes
+            // handling the message just queued here. See AutoServicePeerSession's queue field doc for
+            // the full deadlock/ordering rationale. Symmetric with AutoServiceServerProcessor.
             var peer = _peer;
             if (peer != null)
-            {
-                await peer.HandleInboundAsync(message, cancellationToken).ConfigureAwait(false);
-            }
+                peer.EnqueueInbound(message, cancellationToken);
             else
-            {
                 message.Dispose();
-            }
+
+            return ValueTask.CompletedTask;
         }
 
         public async ValueTask OnDisconnectedAsync(DisconnectReason reason)
         {
+            _peer?.CompleteInbound();
             _peerReady.TrySetException(new InvalidOperationException("The AutoService client disconnected before connecting."));
 
             if (_onDisconnected != null)
