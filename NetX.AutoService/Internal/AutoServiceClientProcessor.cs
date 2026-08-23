@@ -9,7 +9,7 @@ namespace NetX.AutoService.Internal
     internal sealed class AutoServiceClientProcessor : INetXClientProcessor
     {
         private readonly AutoServiceRouter _reverseRouter;
-        private readonly IAutoServiceStrictAuthenticator _authenticator;
+        private readonly Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> _authenticatorFactory;
         private readonly int _maxFrameBytes;
         private readonly Func<IAutoServicePeerSession, CancellationToken, ValueTask> _onConnected;
         private readonly Func<DisconnectReason, ValueTask> _onDisconnected;
@@ -20,13 +20,13 @@ namespace NetX.AutoService.Internal
 
         internal AutoServiceClientProcessor(
             AutoServiceRouter reverseRouter,
-            IAutoServiceStrictAuthenticator authenticator,
+            Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> authenticatorFactory,
             int maxFrameBytes,
             Func<IAutoServicePeerSession, CancellationToken, ValueTask> onConnected,
             Func<DisconnectReason, ValueTask> onDisconnected)
         {
             _reverseRouter = reverseRouter ?? throw new ArgumentNullException(nameof(reverseRouter));
-            _authenticator = authenticator ?? AutoServiceNoAuthAuthenticator.Instance;
+            _authenticatorFactory = authenticatorFactory ?? (_ => AutoServiceNoAuthAuthenticator.Instance);
             _maxFrameBytes = maxFrameBytes;
             _onConnected = onConnected;
             _onDisconnected = onDisconnected;
@@ -37,7 +37,7 @@ namespace NetX.AutoService.Internal
 
         public async ValueTask OnConnectedAsync(INetXConnection client, CancellationToken cancellationToken)
         {
-            _peer = new AutoServicePeerSession(client, Guid.NewGuid(), null, _reverseRouter, _authenticator, _maxFrameBytes);
+            _peer = new AutoServicePeerSession(client, Guid.NewGuid(), null, _reverseRouter, _authenticatorFactory, _maxFrameBytes);
             _peerReady.TrySetResult(_peer);
 
             if (_onConnected != null)

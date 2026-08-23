@@ -12,7 +12,7 @@ namespace NetX.AutoService.Internal
     internal sealed class AutoServiceServerProcessor : INetXServerProcessor
     {
         private readonly AutoServiceRouter _router;
-        private readonly Func<IAutoServiceStrictAuthenticator> _authenticatorFactory;
+        private readonly Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> _authenticatorFactory;
         private readonly int _maxFrameBytes;
         private readonly Func<IAutoServicePeerSession, CancellationToken, ValueTask> _onConnected;
         private readonly Func<IAutoServicePeerSession, DisconnectReason, ValueTask> _onDisconnected;
@@ -20,7 +20,7 @@ namespace NetX.AutoService.Internal
 
         internal AutoServiceServerProcessor(
             AutoServiceRouter router,
-            Func<IAutoServiceStrictAuthenticator> authenticatorFactory,
+            Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> authenticatorFactory,
             int maxFrameBytes,
             Func<IAutoServicePeerSession, CancellationToken, ValueTask> onConnected,
             Func<IAutoServicePeerSession, DisconnectReason, ValueTask> onDisconnected)
@@ -48,13 +48,12 @@ namespace NetX.AutoService.Internal
 
         public async ValueTask OnSessionConnectAsync(INetXSession session, CancellationToken cancellationToken)
         {
-            var authenticator = _authenticatorFactory() ?? AutoServiceNoAuthAuthenticator.Instance;
             var peer = new AutoServicePeerSession(
                 session,
                 session.Id,
                 new IPEndPoint(session.RemoteAddress, 0),
                 _router,
-                authenticator,
+                _authenticatorFactory,
                 _maxFrameBytes);
 
             _sessions[session.Id] = peer;

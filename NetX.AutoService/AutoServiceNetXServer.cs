@@ -25,7 +25,7 @@ namespace NetX.AutoService
         private readonly AutoServiceRouter _router = new();
 
         private IPEndPoint _endPoint = new(IPAddress.Any, 0);
-        private Func<IAutoServiceStrictAuthenticator> _authenticatorFactory = () => AutoServiceNoAuthAuthenticator.Instance;
+        private Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> _authenticatorFactory = _ => AutoServiceNoAuthAuthenticator.Instance;
         private Func<IAutoServicePeerSession, CancellationToken, ValueTask> _onSessionConnected;
         private Func<IAutoServicePeerSession, DisconnectReason, ValueTask> _onSessionDisconnected;
         private int _duplexTimeoutMs = 5000;
@@ -71,7 +71,9 @@ namespace NetX.AutoService
         /// </summary>
         public AutoServiceNetXServerBuilder WithAuthenticator(Func<IAutoServiceStrictAuthenticator> authenticatorFactory)
         {
-            _authenticatorFactory = authenticatorFactory ?? throw new ArgumentNullException(nameof(authenticatorFactory));
+            if (authenticatorFactory == null)
+                throw new ArgumentNullException(nameof(authenticatorFactory));
+            _authenticatorFactory = _ => authenticatorFactory();
             return this;
         }
 
@@ -79,7 +81,18 @@ namespace NetX.AutoService
         {
             if (authenticator == null)
                 throw new ArgumentNullException(nameof(authenticator));
-            _authenticatorFactory = () => authenticator;
+            _authenticatorFactory = _ => authenticator;
+            return this;
+        }
+
+        /// <summary>
+        /// Session-aware overload: the factory receives the <see cref="IAutoServicePeerSession"/> being
+        /// constructed so the authenticator can capture its identity. The session is not dispatch-ready
+        /// while the factory runs; only connection identity and endpoint state should be inspected there.
+        /// </summary>
+        public AutoServiceNetXServerBuilder WithAuthenticator(Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> authenticatorFactory)
+        {
+            _authenticatorFactory = authenticatorFactory ?? throw new ArgumentNullException(nameof(authenticatorFactory));
             return this;
         }
 

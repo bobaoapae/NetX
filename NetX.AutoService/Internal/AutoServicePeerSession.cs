@@ -43,22 +43,31 @@ namespace NetX.AutoService.Internal
             Guid id,
             EndPoint remoteEndPoint,
             AutoServiceRouter router,
-            IAutoServiceStrictAuthenticator authenticator,
+            Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> authenticatorFactory,
             int maxFrameBytes)
         {
             _connection = connection ?? throw new ArgumentNullException(nameof(connection));
             Id = id;
             RemoteEndPoint = remoteEndPoint;
             _router = router ?? throw new ArgumentNullException(nameof(router));
-            _dispatcher = new AutoServiceAuthenticatingDispatcher(router, authenticator);
             _maxFrameBytes = maxFrameBytes;
+            // The factory is invoked with `this` constructed enough for a session-aware authenticator to
+            // address this peer by Id/RemoteEndPoint/Transport (e.g. to correlate it against
+            // connection-level state) -- but before `_dispatcher` exists and before authentication has
+            // happened. The factory must not call back into dispatch (IsAuthenticated/Principal read
+            // `_dispatcher`, which is still null here; see the null-safe getters below) or invoke this
+            // peer's own outbound/inbound methods.
+            var authenticator = authenticatorFactory?.Invoke(this) ?? AutoServiceNoAuthAuthenticator.Instance;
+            _dispatcher = new AutoServiceAuthenticatingDispatcher(router, authenticator);
         }
 
         public Guid Id { get; }
         public EndPoint RemoteEndPoint { get; }
         public bool IsConnected => _connection.IsConnected;
-        public bool IsAuthenticated => _dispatcher.IsAuthenticated;
-        public object Principal => _dispatcher.Principal;
+        // Null-safe: a session-aware authenticator factory (see ctor) can read these before
+        // `_dispatcher` is assigned.
+        public bool IsAuthenticated => _dispatcher?.IsAuthenticated ?? false;
+        public object Principal => _dispatcher?.Principal;
         public IAutoServiceTransport Transport => this;
 
         public async ValueTask<AutoServiceResponse> InvokeAsync(AutoServiceRequest request, CancellationToken cancellationToken = default)
@@ -248,7 +257,10 @@ namespace NetX.AutoService.Internal
                     frame.ContractFingerprint,
                     frame.Payload);
                 var request = new AutoServiceRequest(context, frame.Payload);
-                response = await _dispatcher.DispatchAsync(request, cancellationToken).ConfigureAwait(false);
+                using (AutoServiceSessionContext.Begin(this))
+                {
+                    response = await _dispatcher.DispatchAsync(request, cancellationToken).ConfigureAwait(false);
+                }
             }
             catch (Exception ex)
             {

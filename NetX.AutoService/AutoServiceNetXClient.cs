@@ -24,7 +24,7 @@ namespace NetX.AutoService
         private readonly AutoServiceRouter _reverseRouter = new();
 
         private IPEndPoint _endPoint = new(IPAddress.Loopback, 5000);
-        private Func<IAutoServiceStrictAuthenticator> _authenticatorFactory = () => AutoServiceNoAuthAuthenticator.Instance;
+        private Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> _authenticatorFactory = _ => AutoServiceNoAuthAuthenticator.Instance;
         private Func<IAutoServicePeerSession, CancellationToken, ValueTask> _onConnected;
         private Func<DisconnectReason, ValueTask> _onDisconnected;
         private int _duplexTimeoutMs = 5000;
@@ -66,7 +66,9 @@ namespace NetX.AutoService
         /// </summary>
         public AutoServiceNetXClientBuilder WithAuthenticator(Func<IAutoServiceStrictAuthenticator> authenticatorFactory)
         {
-            _authenticatorFactory = authenticatorFactory ?? throw new ArgumentNullException(nameof(authenticatorFactory));
+            if (authenticatorFactory == null)
+                throw new ArgumentNullException(nameof(authenticatorFactory));
+            _authenticatorFactory = _ => authenticatorFactory();
             return this;
         }
 
@@ -74,7 +76,18 @@ namespace NetX.AutoService
         {
             if (authenticator == null)
                 throw new ArgumentNullException(nameof(authenticator));
-            _authenticatorFactory = () => authenticator;
+            _authenticatorFactory = _ => authenticator;
+            return this;
+        }
+
+        /// <summary>
+        /// Session-aware overload: the factory receives the <see cref="IAutoServicePeerSession"/> being
+        /// constructed so the authenticator can capture its identity. The session is not dispatch-ready
+        /// while the factory runs; only connection identity and endpoint state should be inspected there.
+        /// </summary>
+        public AutoServiceNetXClientBuilder WithAuthenticator(Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> authenticatorFactory)
+        {
+            _authenticatorFactory = authenticatorFactory ?? throw new ArgumentNullException(nameof(authenticatorFactory));
             return this;
         }
 
@@ -120,7 +133,7 @@ namespace NetX.AutoService
         /// <summary>Connects and waits for the local <see cref="IAutoServicePeerSession"/> to be ready.</summary>
         public async Task<AutoServiceNetXClientConnection> ConnectAsync(CancellationToken cancellationToken = default)
         {
-            var processor = new AutoServiceClientProcessor(_reverseRouter, _authenticatorFactory(), _maxFrameBytes, _onConnected, _onDisconnected);
+            var processor = new AutoServiceClientProcessor(_reverseRouter, _authenticatorFactory, _maxFrameBytes, _onConnected, _onDisconnected);
 
             var netXClient = NetXClientBuilder.Create(_loggerFactory, _clientName)
                 .Processor(processor)
