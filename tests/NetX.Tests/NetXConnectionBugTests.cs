@@ -1366,16 +1366,7 @@ public class NetXConnectionBugTests
             BitConverter.TryWriteBytes(frame.AsSpan(4, 8), 0UL); // push
             payload.CopyTo(frame.AsSpan(12));
 
-            try
-            {
-                await raw.SendAsync(frame, SocketFlags.None);
-            }
-            catch (SocketException)
-            {
-                // Linux can surface the server's intentional protocol disconnect while the
-                // oversized frame is still being written. The disconnect assertion below is
-                // the cross-platform contract; a completed send is not required.
-            }
+            await raw.SendAsync(frame, SocketFlags.None);
 
             var deadline = DateTime.UtcNow.AddSeconds(10);
             while (serverProcessor.ReceivedCount < 1 && DateTime.UtcNow < deadline)
@@ -1424,7 +1415,15 @@ public class NetXConnectionBugTests
             BitConverter.TryWriteBytes(frame.AsSpan(4, 8), 0UL);
             payload.CopyTo(frame.AsSpan(12));
 
-            await raw.SendAsync(frame, SocketFlags.None);
+            try
+            {
+                await raw.SendAsync(frame, SocketFlags.None);
+            }
+            catch (SocketException)
+            {
+                // Linux can observe the intentional protocol disconnect while this oversized
+                // frame is still being written. The server-side disconnect below is the contract.
+            }
 
             var disconnectReason = await serverProcessor.Disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
