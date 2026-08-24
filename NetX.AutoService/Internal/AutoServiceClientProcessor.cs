@@ -11,6 +11,8 @@ namespace NetX.AutoService.Internal
         private readonly AutoServiceRouter _reverseRouter;
         private readonly Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> _authenticatorFactory;
         private readonly int _maxFrameBytes;
+        private readonly int _maxConcurrentDispatches;
+        private readonly int _maxPendingInbound;
         private readonly Func<IAutoServicePeerSession, CancellationToken, ValueTask> _onConnected;
         private readonly Func<DisconnectReason, ValueTask> _onDisconnected;
         private readonly TaskCompletionSource<AutoServicePeerSession> _peerReady =
@@ -22,12 +24,16 @@ namespace NetX.AutoService.Internal
             AutoServiceRouter reverseRouter,
             Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> authenticatorFactory,
             int maxFrameBytes,
+            int maxConcurrentDispatches,
+            int maxPendingInbound,
             Func<IAutoServicePeerSession, CancellationToken, ValueTask> onConnected,
             Func<DisconnectReason, ValueTask> onDisconnected)
         {
             _reverseRouter = reverseRouter ?? throw new ArgumentNullException(nameof(reverseRouter));
             _authenticatorFactory = authenticatorFactory ?? (_ => AutoServiceNoAuthAuthenticator.Instance);
             _maxFrameBytes = maxFrameBytes;
+            _maxConcurrentDispatches = maxConcurrentDispatches;
+            _maxPendingInbound = maxPendingInbound;
             _onConnected = onConnected;
             _onDisconnected = onDisconnected;
         }
@@ -37,7 +43,7 @@ namespace NetX.AutoService.Internal
 
         public async ValueTask OnConnectedAsync(INetXConnection client, CancellationToken cancellationToken)
         {
-            _peer = new AutoServicePeerSession(client, Guid.NewGuid(), null, _reverseRouter, _authenticatorFactory, _maxFrameBytes);
+            _peer = new AutoServicePeerSession(client, Guid.NewGuid(), null, _reverseRouter, _authenticatorFactory, _maxFrameBytes, _maxConcurrentDispatches, _maxPendingInbound);
             _peerReady.TrySetResult(_peer);
 
             if (_onConnected != null)
@@ -47,11 +53,9 @@ namespace NetX.AutoService.Internal
         public ValueTask OnReceivedMessageAsync(INetXConnection client, NetXMessage message, CancellationToken cancellationToken)
         {
             // NetXConnection.ReadPipeAsync awaits this method before it reads the next frame off the
-            // wire. EnqueueInbound hands the message off to this peer's own serial inbound queue and
-            // returns immediately, so this read loop can move straight on -- including to the reply
-            // frame of a reverse call a dispatcher makes back into this same peer before it finishes
-            // handling the message just queued here. See AutoServicePeerSession's queue field doc for
-            // the full deadlock/ordering rationale. Symmetric with AutoServiceServerProcessor.
+            // wire. EnqueueInbound hands the message to this peer's bounded pipeline and returns
+            // immediately, so the loop can still read reverse-call replies. Decode/auth ordering and
+            // bounded concurrent dispatch are symmetric with AutoServiceServerProcessor.
             var peer = _peer;
             if (peer != null)
                 peer.EnqueueInbound(message, cancellationToken);

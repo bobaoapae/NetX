@@ -5,10 +5,11 @@ namespace NetX.AutoService
 {
     /// <summary>
     /// Ambient, per-dispatch identity of the <see cref="IAutoServicePeerSession"/> currently executing an
-    /// inbound call. Set by <see cref="Internal.AutoServicePeerSession.HandleInboundAsync"/> around the
-    /// dispatcher invocation -- covering requests, one-way calls and the op-0 auth handshake alike, on
+    /// inbound call. Set by the bounded inbound pipeline in
+    /// <see cref="Internal.AutoServicePeerSession"/> around the dispatcher invocation -- covering
+    /// requests, one-way calls and the op-0 auth handshake alike, on
     /// both the server side and the client's own reverse dispatch (both ride the same
-    /// <c>HandleInboundAsync</c>). <see cref="Current"/> is null everywhere outside of that scope
+    /// bounded inbound pipeline). <see cref="Current"/> is null everywhere outside of that scope
     /// (background loops, timers, code that runs before/after a dispatch).
     /// </summary>
     public static class AutoServiceSessionContext

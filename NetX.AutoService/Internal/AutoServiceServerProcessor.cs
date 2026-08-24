@@ -14,6 +14,8 @@ namespace NetX.AutoService.Internal
         private readonly AutoServiceRouter _router;
         private readonly Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> _authenticatorFactory;
         private readonly int _maxFrameBytes;
+        private readonly int _maxConcurrentDispatches;
+        private readonly int _maxPendingInbound;
         private readonly Func<IAutoServicePeerSession, CancellationToken, ValueTask> _onConnected;
         private readonly Func<IAutoServicePeerSession, DisconnectReason, ValueTask> _onDisconnected;
         private readonly ConcurrentDictionary<Guid, AutoServicePeerSession> _sessions = new();
@@ -22,12 +24,16 @@ namespace NetX.AutoService.Internal
             AutoServiceRouter router,
             Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> authenticatorFactory,
             int maxFrameBytes,
+            int maxConcurrentDispatches,
+            int maxPendingInbound,
             Func<IAutoServicePeerSession, CancellationToken, ValueTask> onConnected,
             Func<IAutoServicePeerSession, DisconnectReason, ValueTask> onDisconnected)
         {
             _router = router ?? throw new ArgumentNullException(nameof(router));
             _authenticatorFactory = authenticatorFactory ?? throw new ArgumentNullException(nameof(authenticatorFactory));
             _maxFrameBytes = maxFrameBytes;
+            _maxConcurrentDispatches = maxConcurrentDispatches;
+            _maxPendingInbound = maxPendingInbound;
             _onConnected = onConnected;
             _onDisconnected = onDisconnected;
         }
@@ -54,7 +60,9 @@ namespace NetX.AutoService.Internal
                 new IPEndPoint(session.RemoteAddress, 0),
                 _router,
                 _authenticatorFactory,
-                _maxFrameBytes);
+                _maxFrameBytes,
+                _maxConcurrentDispatches,
+                _maxPendingInbound);
 
             _sessions[session.Id] = peer;
 
@@ -65,11 +73,10 @@ namespace NetX.AutoService.Internal
         public ValueTask OnReceivedMessageAsync(INetXSession session, NetXMessage message, CancellationToken cancellationToken)
         {
             // NetXConnection.ReadPipeAsync awaits this method before it reads the next frame off the
-            // wire. EnqueueInbound hands the message off to this peer's own serial inbound queue and
-            // returns immediately, so this read loop can move straight on -- including to the reply
-            // frame of a reverse call a dispatcher makes back into this same peer before it finishes
-            // handling the message just queued here. See AutoServicePeerSession's queue field doc for
-            // the full deadlock/ordering rationale.
+            // wire. EnqueueInbound hands the message to this peer's bounded pipeline and returns
+            // immediately, so the loop can still read reverse-call replies. The peer decodes FIFO,
+            // keeps operation 0 as an inline barrier, and dispatches authenticated non-auth frames
+            // concurrently within its configured slot limit.
             if (_sessions.TryGetValue(session.Id, out var peer))
                 peer.EnqueueInbound(message, cancellationToken);
             else

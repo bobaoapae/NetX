@@ -6,7 +6,7 @@
         <Nullable>disable</Nullable>
         <LangVersion>latest</LangVersion>
         <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-        <Version>3.1.1</Version>
+        <Version>3.2.0</Version>
         <IncludeSymbols>true</IncludeSymbols>
         <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     </PropertyGroup>
@@ -17,7 +17,7 @@
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="NetX.AutoServiceGenerator.Definitions" Version="4.0.0" />
+        <PackageReference Include="NetX.AutoServiceGenerator.Definitions" Version="4.0.1" />
     </ItemGroup>
 
 </Project>

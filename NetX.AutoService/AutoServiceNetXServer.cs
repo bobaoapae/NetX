@@ -34,6 +34,8 @@ namespace NetX.AutoService
         private int _sendBufferSize = 8192;
         private bool _noDelay = true;
         private int _backlog = 100;
+        private int _maxConcurrentDispatches = 64;
+        private int _maxPendingInbound = 128;
 
         internal AutoServiceNetXServerBuilder(ILoggerFactory loggerFactory, string serverName)
         {
@@ -141,10 +143,38 @@ namespace NetX.AutoService
             return this;
         }
 
+        /// <summary>
+        /// Caps how many non-auth inbound dispatches (Request/OneWay) run concurrently per peer via a
+        /// dispatch-slot semaphore -- bounds the reentrant-duplex fan-out that op-0's inline barrier
+        /// doesn't cover. Non-auth completion order is not guaranteed. Nesting deeper than this cap
+        /// resolves only when a transport timeout frees a slot or pending traffic overflows the queue
+        /// and disconnects the peer. Default 64. Must be &gt; 0.
+        /// </summary>
+        public AutoServiceNetXServerBuilder WithMaxConcurrentDispatches(int maxConcurrentDispatches)
+        {
+            if (maxConcurrentDispatches <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxConcurrentDispatches));
+            _maxConcurrentDispatches = maxConcurrentDispatches;
+            return this;
+        }
+
+        /// <summary>
+        /// Caps the per-peer inbound queue depth. A peer that overflows it is disconnected (never
+        /// blocked -- see the peer session's inbound-queue doc for why blocking the read loop here
+        /// would deadlock). Default 128. Must be &gt; 0.
+        /// </summary>
+        public AutoServiceNetXServerBuilder WithMaxPendingInbound(int maxPendingInbound)
+        {
+            if (maxPendingInbound <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxPendingInbound));
+            _maxPendingInbound = maxPendingInbound;
+            return this;
+        }
+
         /// <summary>Builds and starts listening. Cancelling <paramref name="cancellationToken"/> shuts the server down.</summary>
         public Task<AutoServiceNetXServerHost> StartAsync(CancellationToken cancellationToken = default)
         {
-            var processor = new AutoServiceServerProcessor(_router, _authenticatorFactory, _maxFrameBytes, _onSessionConnected, _onSessionDisconnected);
+            var processor = new AutoServiceServerProcessor(_router, _authenticatorFactory, _maxFrameBytes, _maxConcurrentDispatches, _maxPendingInbound, _onSessionConnected, _onSessionDisconnected);
 
             // Note: server-specific fluent methods (Backlog, UseProxy) live on INetXServerOptionsBuilder,
             // whose own methods (EndPoint, NoDelay, ...) return the narrower INetXConnectionOptionsBuilder<T>

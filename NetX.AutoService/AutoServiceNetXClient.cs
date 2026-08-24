@@ -32,6 +32,8 @@ namespace NetX.AutoService
         private int _receiveBufferSize = 8192;
         private int _sendBufferSize = 8192;
         private bool _noDelay = true;
+        private int _maxConcurrentDispatches = 64;
+        private int _maxPendingInbound = 128;
 
         internal AutoServiceNetXClientBuilder(ILoggerFactory loggerFactory, string clientName)
         {
@@ -130,10 +132,38 @@ namespace NetX.AutoService
             return this;
         }
 
+        /// <summary>
+        /// Caps how many non-auth inbound dispatches (Request/OneWay) run concurrently on this
+        /// connection's reverse-call path via a dispatch-slot semaphore -- bounds the reentrant-duplex
+        /// fan-out that op-0's inline barrier doesn't cover. Non-auth completion order is not guaranteed.
+        /// Nesting deeper than this cap resolves only when a transport timeout frees a slot or pending
+        /// traffic overflows the queue and disconnects the peer. Default 64. Must be &gt; 0.
+        /// </summary>
+        public AutoServiceNetXClientBuilder WithMaxConcurrentDispatches(int maxConcurrentDispatches)
+        {
+            if (maxConcurrentDispatches <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxConcurrentDispatches));
+            _maxConcurrentDispatches = maxConcurrentDispatches;
+            return this;
+        }
+
+        /// <summary>
+        /// Caps the inbound (reverse-call) queue depth on this connection. Overflowing it disconnects
+        /// the connection (never blocks -- see the peer session's inbound-queue doc for why blocking the
+        /// read loop here would deadlock). Default 128. Must be &gt; 0.
+        /// </summary>
+        public AutoServiceNetXClientBuilder WithMaxPendingInbound(int maxPendingInbound)
+        {
+            if (maxPendingInbound <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxPendingInbound));
+            _maxPendingInbound = maxPendingInbound;
+            return this;
+        }
+
         /// <summary>Connects and waits for the local <see cref="IAutoServicePeerSession"/> to be ready.</summary>
         public async Task<AutoServiceNetXClientConnection> ConnectAsync(CancellationToken cancellationToken = default)
         {
-            var processor = new AutoServiceClientProcessor(_reverseRouter, _authenticatorFactory, _maxFrameBytes, _onConnected, _onDisconnected);
+            var processor = new AutoServiceClientProcessor(_reverseRouter, _authenticatorFactory, _maxFrameBytes, _maxConcurrentDispatches, _maxPendingInbound, _onConnected, _onDisconnected);
 
             var netXClient = NetXClientBuilder.Create(_loggerFactory, _clientName)
                 .Processor(processor)

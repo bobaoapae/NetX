@@ -20,7 +20,7 @@ namespace NetX.AutoService.Internal
     /// constant placeholder, since NetX already guarantees the reply bytes handed back are the reply to
     /// exactly this request.
     ///
-    /// Inbound frames (<see cref="HandleInboundAsync"/>) are decoded and routed through this peer's own
+    /// Inbound frames (<see cref="RouteInboundAsync"/>) are decoded and routed through this peer's own
     /// <see cref="AutoServiceAuthenticatingDispatcher"/>, then replied to via NetX's
     /// <see cref="INetXConnection.ReplyAsync"/> using the *NetX* correlation id carried by the inbound
     /// <see cref="NetXMessage"/> (not the AutoService frame's).
@@ -40,25 +40,23 @@ namespace NetX.AutoService.Internal
         private readonly int _maxFrameBytes;
 
         // NetX's read loop (NetXConnection.ReadPipeAsync) awaits OnReceivedMessageAsync before it reads
-        // the next frame. Two things are both true at once here:
-        //  1. A dispatcher invoked from HandleInboundAsync may call back into this same peer (a reverse
-        //     operation over the same connection) before it finishes handling the forward call -- that
-        //     reverse call's reply can only ever arrive on this connection's read loop, so
-        //     OnReceivedMessageAsync must return before HandleInboundAsync completes, or the nested
-        //     round trip deadlocks.
-        //  2. Frames must still be handled in the order NetX handed them to this peer -- letting each
-        //     one dispatch fully concurrently (fire-and-forget per message) can run frame N and frame
-        //     N+1 side by side, and two ordered calls (e.g. authenticate then a follow-up op) can
-        //     execute or complete out of order.
-        // This queue is the resolution: EnqueueInbound hands the message off and returns immediately
-        // (satisfying #1), while a single background worker drains it one message at a time via
-        // HandleInboundAsync (satisfying #2). Reply frames never reach here -- NetX matches those
-        // against pending RequestAsync completions before a message is ever handed to a processor (see
-        // the Response-frame no-op inside HandleInboundAsync) -- so a reverse call's reply is free to
-        // land on the read loop and complete while this queue is still draining an earlier forward call.
-        private readonly Channel<PendingInbound> _inboundQueue = Channel.CreateUnbounded<PendingInbound>(
-            new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
-        private readonly Task _inboundWorker;
+        // the next frame. The bounded queue therefore admits and decodes frames in arrival order, then
+        // returns immediately to the read loop. Operation 0/auth is the one ordering barrier: the worker
+        // dispatches it inline and awaits it before starting the next frame. Non-auth dispatches acquire
+        // one of the bounded slots and continue on detached tasks, so nested calls can re-enter this
+        // peer while an outer handler is awaiting a reply. Completion order among non-auth calls is not
+        // ordered. A queue overflow disconnects instead of waiting for the read loop: the reply that
+        // could unblock a handler arrives on that same loop, so waiting here would recreate the deadlock.
+        // Reply frames never reach this queue -- NetX matches those against pending RequestAsync
+        // completions before a message is handed to a processor. A nesting chain deeper than the slot
+        // count can therefore wait until a timeout or queue overflow; no immediate disconnect is
+        // promised for that case. Reentrant dispatch is guaranteed only after authentication: op-0 is
+        // intentionally an inline barrier, so an authenticator must not synchronously call back into
+        // this same peer and await another inbound operation.
+        private readonly Channel<PendingInbound> _inboundQueue;
+        private readonly SemaphoreSlim _dispatchSlots;
+        private readonly CancellationTokenSource _lifetimeCts;
+        private int _inboundCompleted;
 
         private readonly struct PendingInbound
         {
@@ -78,13 +76,30 @@ namespace NetX.AutoService.Internal
             EndPoint remoteEndPoint,
             AutoServiceRouter router,
             Func<IAutoServicePeerSession, IAutoServiceStrictAuthenticator> authenticatorFactory,
-            int maxFrameBytes)
+            int maxFrameBytes,
+            int maxConcurrentDispatches,
+            int maxPendingInbound)
         {
             _connection = connection ?? throw new ArgumentNullException(nameof(connection));
             Id = id;
             RemoteEndPoint = remoteEndPoint;
             _router = router ?? throw new ArgumentNullException(nameof(router));
             _maxFrameBytes = maxFrameBytes;
+            if (maxConcurrentDispatches <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxConcurrentDispatches), maxConcurrentDispatches, "The dispatch concurrency must be positive.");
+            if (maxPendingInbound <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxPendingInbound), maxPendingInbound, "The pending inbound capacity must be positive.");
+
+            _inboundQueue = Channel.CreateBounded<PendingInbound>(new BoundedChannelOptions(maxPendingInbound)
+            {
+                // Wait mode makes TryWrite report a full queue instead of silently dropping an item.
+                // This peer never calls WriteAsync/WaitToWriteAsync, so the NetX read loop never waits.
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = true,
+                SingleWriter = true,
+            });
+            _dispatchSlots = new SemaphoreSlim(maxConcurrentDispatches, maxConcurrentDispatches);
+            _lifetimeCts = new CancellationTokenSource();
             // The factory is invoked with `this` constructed enough for a session-aware authenticator to
             // address this peer by Id/RemoteEndPoint/Transport (e.g. to correlate it against
             // connection-level state) -- but before `_dispatcher` exists and before authentication has
@@ -93,7 +108,9 @@ namespace NetX.AutoService.Internal
             // peer's own outbound/inbound methods.
             var authenticator = authenticatorFactory?.Invoke(this) ?? AutoServiceNoAuthAuthenticator.Instance;
             _dispatcher = new AutoServiceAuthenticatingDispatcher(router, authenticator);
-            _inboundWorker = Task.Run(ProcessInboundQueueAsync);
+            // The worker is deliberately detached: NetX owns connection lifetime, while this peer
+            // drains/disposes its queue and detached dispatches independently during teardown.
+            _ = Task.Run(ProcessInboundQueueAsync);
         }
 
         public Guid Id { get; }
@@ -208,105 +225,114 @@ namespace NetX.AutoService.Internal
         }
 
         /// <summary>
-        /// Hands <paramref name="message"/> off to this peer's serial inbound queue and returns
+        /// Hands <paramref name="message"/> off to this peer's bounded inbound queue and returns
         /// immediately -- called synchronously from the owning processor's OnReceivedMessageAsync so the
-        /// NetX read loop can move straight on to the next frame (see the queue's own doc comment above
-        /// for why that matters). Takes ownership of <paramref name="message"/>: it is either queued (and
-        /// later disposed by <see cref="HandleInboundAsync"/>) or, if the queue has already been
-        /// completed (this peer disconnected), disposed here.
+        /// NetX read loop can move straight on to the next frame. Takes ownership of
+        /// <paramref name="message"/>: it is either queued (and later disposed after decode) or disposed
+        /// here. A full active queue is a protocol-level overflow and disconnects the peer; a completed
+        /// queue only disposes the late message because teardown is already in progress.
         /// </summary>
         internal void EnqueueInbound(NetXMessage message, CancellationToken cancellationToken)
         {
-            if (!_inboundQueue.Writer.TryWrite(new PendingInbound(message, cancellationToken)))
-                message.Dispose();
-        }
-
-        /// <summary>
-        /// Stops accepting further inbound frames and lets the worker drain whatever is already queued.
-        /// Called once by the owning processor when its NetX session/connection disconnects.
-        /// </summary>
-        internal void CompleteInbound() => _inboundQueue.Writer.TryComplete();
-
-        private async Task ProcessInboundQueueAsync()
-        {
-            await foreach (var pending in _inboundQueue.Reader.ReadAllAsync().ConfigureAwait(false))
+            if (Volatile.Read(ref _inboundCompleted) != 0
+                || !_inboundQueue.Writer.TryWrite(new PendingInbound(message, cancellationToken)))
             {
-                try
-                {
-                    await HandleInboundAsync(pending.Message, pending.CancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    // Shutdown/cancellation of the owning connection -- nothing left to reply to.
-                }
-                catch (Exception)
-                {
-                    // HandleInboundAsync already turns dispatcher/service failures into a structured
-                    // AutoServiceResponse and replies with it -- reaching here means the reply/protocol-
-                    // error write itself (or NetX's own send path underneath it) failed unexpectedly.
-                    // There is no reply channel left to trust, so tear the connection down rather than
-                    // leave a caller hanging on a request this connection can no longer honor.
+                message.Dispose();
+
+                // TryWrite can fail because the bounded queue is full or because CompleteInbound raced
+                // with this enqueue. Only the former is an overflow requiring a new disconnect.
+                if (Volatile.Read(ref _inboundCompleted) == 0)
                     Disconnect();
-                }
             }
         }
 
         /// <summary>
-        /// Decodes one inbound <see cref="NetXMessage"/> as an AutoService frame, dispatches it through
-        /// this peer's <see cref="AutoServiceAuthenticatingDispatcher"/>, and (for request frames) replies
-        /// via NetX's own correlation id. Takes ownership of <paramref name="message"/> (always disposed).
+        /// Stops accepting further inbound frames, wakes any worker waiting for a dispatch slot, and
+        /// disposes whatever remains queued. Idempotent; called by the owning processor when its NetX
+        /// session/connection disconnects.
         /// </summary>
-        internal async Task HandleInboundAsync(NetXMessage message, CancellationToken cancellationToken)
+        internal void CompleteInbound()
         {
-            using var owned = message;
+            if (Interlocked.Exchange(ref _inboundCompleted, 1) != 0)
+                return;
 
-            // NetX's own correlation id (not the AutoService frame's own, constant, FrameCorrelationId)
-            // is what tells us whether the peer is waiting on a reply via RequestAsync (non-zero) or
-            // sent a push/one-way frame via SendAsync (zero, see AutoServicePeerSession.SendOneWayAsync).
-            // Crucially this is known even when the AutoService-level frame below turns out to be
-            // undecodable, because NetX parses its own envelope before this processor is ever reached.
-            var expectsReply = !owned.IsPush;
+            _lifetimeCts.Cancel();
+            _inboundQueue.Writer.TryComplete();
+        }
+
+        private async Task ProcessInboundQueueAsync()
+        {
+            try
+            {
+                await foreach (var pending in _inboundQueue.Reader.ReadAllAsync().ConfigureAwait(false))
+                {
+                    await RouteInboundAsync(pending.Message, pending.CancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (_lifetimeCts.IsCancellationRequested)
+            {
+                // Completion cancels the lifetime to release a slot wait; the finally block still owns
+                // disposal of every item that was left behind in the queue.
+            }
+            catch (Exception)
+            {
+                // A worker failure means this peer can no longer provide a reliable reply/protocol
+                // result. Complete first so late frames are disposed even before NetX reports the
+                // disconnect back to the processor; then tear down the physical connection.
+                CompleteInbound();
+                try { Disconnect(); } catch { }
+            }
+            finally
+            {
+                while (_inboundQueue.Reader.TryRead(out var pending))
+                    pending.Message.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Decodes and validates one inbound message on the FIFO worker. The pooled NetX message is
+        /// disposed immediately after decode because the codec owns a heap copy of the payload. Auth
+        /// (operation 0) is dispatched inline as the ordering barrier. Before authentication completes,
+        /// non-auth calls also remain inline so a frame that arrived before auth cannot be scheduled after
+        /// a later auth frame and accidentally observe authenticated state. Other calls acquire a bounded
+        /// slot and are detached so nested duplex dispatch can re-enter this peer.
+        /// </summary>
+        private async Task RouteInboundAsync(NetXMessage message, CancellationToken cancellationToken)
+        {
+            // Capture these before disposing the pooled NetX message. The AutoService-level decoder
+            // copies payload bytes into the returned frame, while the NetX correlation id is metadata
+            // owned by the message itself.
+            var correlationId = message.CorrelationId;
+            var expectsReply = !message.IsPush;
 
             AutoServiceFrame frame;
             try
             {
-                frame = AutoServiceFrameCodec.Decode(owned.Buffer.Span, _maxFrameBytes);
+                frame = AutoServiceFrameCodec.Decode(message.Buffer.Span, _maxFrameBytes);
             }
             catch (Exception ex)
             {
-                // Bug fix: this used to be a silent drop for every decode failure, including a payload
-                // that merely exceeded the configured AutoService-level MaxFrameBytes (NetX's own,
-                // larger, MaxFrameBytes + AutoServiceNetXFrameLimits.OverheadMargin guard already let
-                // the frame through -- see AutoServiceNetXServerBuilder.StartAsync). A caller awaiting
-                // InvokeAsync on the other end would then hang until its own duplex timeout fired,
-                // observing a silent timeout instead of a structured error for what is, from the wire's
-                // perspective, a clean and legible rejection. If NetX's own correlation id tells us a
-                // reply is expected, we always have enough to answer structurally regardless of what
-                // failed to decode inside the AutoService frame itself. Otherwise (a one-way/push frame,
-                // which has no reply channel to answer on) there is no way to signal the failure back to
-                // the sender other than tearing down the connection as a protocol violation -- silently
-                // dropping it would leave the sender believing delivery succeeded.
+                message.Dispose();
+                // A malformed request can still receive a structured protocol error because NetX's
+                // correlation id was parsed outside the AutoService payload. A push has no reply path,
+                // so it is a protocol violation and must disconnect.
                 if (expectsReply)
-                    await ReplyWithProtocolErrorAsync(owned.CorrelationId, DescribeDecodeFailure(ex), cancellationToken).ConfigureAwait(false);
+                    await ReplyWithProtocolErrorAsync(correlationId, DescribeDecodeFailure(ex), cancellationToken).ConfigureAwait(false);
                 else
                     _connection.Disconnect();
                 return;
             }
 
+            // Decode copied the payload; return the pooled buffer before any dispatch can block.
+            message.Dispose();
+
             // A response frame should never reach here -- NetX already matches replies against pending
-            // RequestAsync completions before a message is ever handed to a processor. Defensive no-op.
+            // RequestAsync completions before a message is handed to a processor. Defensive no-op.
             if (frame.Kind == AutoServiceFrameKind.Response)
                 return;
 
-            // Gap (flagged for the ASG generator, see AutoServiceRouter.TryGetOperationDescriptor):
             // AutoServiceRequest/AutoServiceCallContext do not carry which physical frame kind (Request
-            // vs OneWay) an inbound call arrived as, so AutoServiceRouter.DispatchAsync itself cannot
-            // validate it against AutoServiceOperationDescriptor.OneWay. This binding knows the kind
-            // (frame.Kind) and can look the descriptor up, so it validates here -- the one place in this
-            // stack both facts are available -- instead of letting a Request sent for a declared OneWay
-            // operation (or vice versa) dispatch ambiguously (e.g. a OneWay caller silently never
-            // learning a "reply" it will never receive was actually swallowed, or a Request caller
-            // hanging because a OneWay-only handler never produces one).
+            // vs OneWay) arrived, so validate the mismatch at this binding where both facts are known.
             if (frame.OperationId != AutoServiceAuthentication.OperationId
                 && _router.TryGetOperationDescriptor(frame.ServiceId, frame.OperationId, out var operation)
                 && operation.OneWay != (frame.Kind == AutoServiceFrameKind.OneWay))
@@ -316,14 +342,54 @@ namespace NetX.AutoService.Internal
                     : $"Operation '{operation.Name}' ({frame.ServiceId}/{frame.OperationId}) is not declared OneWay and requires a request expecting a reply.";
 
                 if (expectsReply)
-                    await ReplyWithProtocolErrorAsync(owned.CorrelationId, mismatchMessage, cancellationToken).ConfigureAwait(false);
+                    await ReplyWithProtocolErrorAsync(correlationId, mismatchMessage, cancellationToken).ConfigureAwait(false);
                 else
-                    // A OneWay frame invoking a non-OneWay operation has no reply channel to explain
-                    // itself on -- same rationale as the decode-failure branch above.
                     _connection.Disconnect();
                 return;
             }
 
+            // Operation zero is the authentication barrier. Keep pre-auth calls inline as well: this
+            // preserves the FIFO security decision when a non-auth frame arrived before a later auth
+            // frame but the latter has already reached the worker. Once authenticated, non-auth calls
+            // may proceed concurrently.
+            if (frame.OperationId == AutoServiceAuthentication.OperationId || !_dispatcher.IsAuthenticated)
+            {
+                await DispatchAndReplyAsync(frame, expectsReply, correlationId, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            await _dispatchSlots.WaitAsync(_lifetimeCts.Token).ConfigureAwait(false);
+            // This task deliberately owns its slot until dispatch and reply handling complete. Catch all
+            // failures so the detached Task.Run never faults as an unobserved task.
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await DispatchAndReplyAsync(frame, expectsReply, correlationId, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    try { Disconnect(); } catch { }
+                }
+                finally
+                {
+                    try { _dispatchSlots.Release(); } catch { }
+                }
+            });
+        }
+
+        /// <summary>
+        /// Dispatches one decoded frame and, when the physical frame expects a reply, encodes and sends
+        /// that reply using NetX's correlation id. Dispatcher/service failures retain the previous
+        /// structured internal-error response semantics; transport/protocol failures escape to the
+        /// owning inline worker or detached wrapper, which disconnects the peer.
+        /// </summary>
+        private async Task DispatchAndReplyAsync(
+            AutoServiceFrame frame,
+            bool expectsReply,
+            ulong correlationId,
+            CancellationToken cancellationToken)
+        {
             AutoServiceResponse response;
             try
             {
@@ -346,7 +412,7 @@ namespace NetX.AutoService.Internal
                 response = AutoServiceResponse.Failure(AutoServiceErrorCode.Internal, ex.Message);
             }
 
-            if (frame.Kind == AutoServiceFrameKind.OneWay)
+            if (!expectsReply)
                 return;
 
             byte[] encoded;
@@ -377,7 +443,7 @@ namespace NetX.AutoService.Internal
                 encoded = AutoServiceFrameCodec.Encode(failureFrame, _maxFrameBytes);
             }
 
-            await _connection.ReplyAsync(owned.CorrelationId, encoded, cancellationToken).ConfigureAwait(false);
+            await _connection.ReplyAsync(correlationId, encoded, cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>
